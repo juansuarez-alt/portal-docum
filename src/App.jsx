@@ -107,10 +107,12 @@ export default function App() {
       <nav className="tabs">
         <button className={tab === 'malla' ? 'on' : ''} onClick={() => setTab('malla')}>Malla horaria</button>
         <button className={tab === 'llegada' ? 'on' : ''} onClick={() => setTab('llegada')}>Reporte de llegada</button>
+        <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas DOCUM</button>
       </nav>
       <main className="wrap">
         {tab === 'malla' && <Malla email={email} isAdmin={isAdmin} />}
         {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={isAdmin} />}
+        {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={isAdmin} />}
       </main>
       <footer className="foot">Base de datos en Supabase · acceso por Google Workspace</footer>
     </div>
@@ -354,6 +356,142 @@ function Llegada({ email, name, isAdmin }) {
               <td><span className={'pill ' + (r.estado === 'tarde' ? 'amber' : 'green')}>{r.estado === 'tarde' ? 'Tarde' : 'A tiempo'}</span></td>
               <td>{r.motivo || '—'}</td></tr>)}</tbody></table></div>}
       </div>
+    </>
+  )
+}
+
+/* ================= PROBLEMAS DOCUM ================= */
+function Problemas({ email, name, isAdmin }) {
+  const [problems, setProblems] = useState([])
+  const [cases, setCases] = useState([])
+  const [analysts, setAnalysts] = useState([])
+  const [openId, setOpenId] = useState(null)
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [msg, setMsg] = useState(null)
+  // formulario de caso por problema
+  const [cf, setCf] = useState({ ticket: '', analystId: '', resolved: false, note: '' })
+
+  const load = useCallback(async () => {
+    const { data: p } = await supabase.from('problems').select('*').order('created_at', { ascending: false })
+    const { data: c } = await supabase.from('problem_cases').select('*').order('created_at', { ascending: true })
+    const { data: a } = await supabase.from('analysts').select('*').order('name')
+    setProblems(p || []); setCases(c || []); setAnalysts(a || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const casesOf = (pid) => cases.filter(c => c.problem_id === pid)
+
+  const addProblem = async () => {
+    if (!title.trim()) return
+    const { error } = await supabase.from('problems').insert({ title: title.trim(), description: desc.trim(), created_by: email })
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setTitle(''); setDesc(''); setMsg({ t: 'ok', m: 'Problema creado.' }); load()
+  }
+  const removeProblem = async (pid) => {
+    if (!confirm('¿Eliminar el problema y todos sus casos?')) return
+    await supabase.from('problems').delete().eq('id', pid); load()
+  }
+  const addCase = async (pid) => {
+    if (!cf.ticket.trim()) return
+    const an = analysts.find(a => a.id === cf.analystId)
+    const { error } = await supabase.from('problem_cases').insert({
+      problem_id: pid, ticket: cf.ticket.trim(),
+      analyst_email: an?.email || null, analyst_name: an?.name || null,
+      resolved: cf.resolved, note: cf.note.trim() || null, created_by: email,
+    })
+    if (error) { alert('Error: ' + error.message); return }
+    setCf({ ticket: '', analystId: '', resolved: false, note: '' }); load()
+  }
+  const toggleCase = async (c) => { await supabase.from('problem_cases').update({ resolved: !c.resolved }).eq('id', c.id); load() }
+  const removeCase = async (id) => { await supabase.from('problem_cases').delete().eq('id', id); load() }
+
+  return (
+    <>
+      {/* Dash solo para admin */}
+      {isAdmin && problems.length > 0 && (
+        <div className="card">
+          <div className="cardh"><b>Resumen de problemas</b><div className="muted sm">Solo administrador</div></div>
+          <div className="scroll">
+            <table><thead><tr><th>Problema</th><th>Casos</th><th>Resueltos</th><th>Pendientes</th></tr></thead>
+              <tbody>{problems.map(p => {
+                const cs = casesOf(p.id), sol = cs.filter(c => c.resolved).length
+                return <tr key={p.id}><td style={{ fontWeight: 600, color: 'var(--ink)' }}>{p.title}</td>
+                  <td><span className="pill" style={{ background: 'var(--ink)', color: '#fff' }}>{cs.length}</span></td>
+                  <td className="tabular" style={{ color: 'var(--emerald)' }}>{sol}</td>
+                  <td className="tabular" style={{ color: 'var(--amber)' }}>{cs.length - sol}</td></tr>
+              })}</tbody></table>
+          </div>
+        </div>
+      )}
+
+      {/* Crear problema (solo admin) */}
+      {isAdmin && (
+        <div className="card">
+          <div className="cardh"><b>Registrar un problema</b><div className="muted sm">Solo el administrador crea problemas.</div></div>
+          <div className="grid" style={{ gridTemplateColumns: '1fr' }}>
+            <input placeholder="Título (ej: Problema testigos)" value={title} onChange={e => setTitle(e.target.value)} />
+            <textarea rows={2} placeholder="Descripción breve del problema" value={desc} onChange={e => setDesc(e.target.value)} />
+          </div>
+          {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 10 }}>{msg.m}</div>}
+          <button className="btn primary" style={{ marginTop: 12 }} onClick={addProblem} disabled={!title.trim()}>Crear problema</button>
+        </div>
+      )}
+
+      {/* Lista de problemas */}
+      {problems.length === 0
+        ? <div className="card"><div className="empty">Aún no hay problemas registrados.</div></div>
+        : problems.map(p => {
+          const cs = casesOf(p.id), sol = cs.filter(c => c.resolved).length, open = openId === p.id
+          return (
+            <div className="card" key={p.id}>
+              <div className="cardh">
+                <div><b>⚠ {p.title}</b>{p.description && <div className="muted sm">{p.description}</div>}</div>
+                <div className="row" style={{ alignItems: 'center' }}>
+                  <span className="pill" style={{ background: 'var(--ink)', color: '#fff' }}>{cs.length} {cs.length === 1 ? 'caso' : 'casos'}</span>
+                  <span className="pill green">{sol} resueltos</span>
+                  <button className="btn ghost sm" onClick={() => setOpenId(open ? null : p.id)}>{open ? 'Ocultar' : 'Ver casos'}</button>
+                  {isAdmin && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeProblem(p.id)}>Eliminar</button>}
+                </div>
+              </div>
+              {open && (
+                <>
+                  {/* Agregar caso (analista o admin) */}
+                  <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', background: '#f8fafc', padding: 12, borderRadius: 9, margin: '4px 0 14px' }}>
+                    <label className="f"># Ticket<input placeholder="Ej: 483920" value={cf.ticket} onChange={e => setCf({ ...cf, ticket: e.target.value })} /></label>
+                    <label className="f">Atendido por
+                      <select value={cf.analystId} onChange={e => setCf({ ...cf, analystId: e.target.value })}>
+                        <option value="">—</option>{analysts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="f">Nota (opcional)<input placeholder="Detalle breve" value={cf.note} onChange={e => setCf({ ...cf, note: e.target.value })} /></label>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                      <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+                        <input type="checkbox" style={{ width: 'auto' }} checked={cf.resolved} onChange={e => setCf({ ...cf, resolved: e.target.checked })} /> ¿Solución?
+                      </label>
+                      <button className="btn primary sm" onClick={() => addCase(p.id)} disabled={!cf.ticket.trim()}>Agregar ticket</button>
+                    </div>
+                  </div>
+                  {cs.length === 0 ? <div className="empty">Sin casos aún.</div> : (
+                    <div className="scroll">
+                      <table><thead><tr><th>#</th><th># Ticket</th><th>Analista</th><th>Nota</th><th>Solución</th><th></th></tr></thead>
+                        <tbody>{cs.map((c, i) => (
+                          <tr key={c.id}>
+                            <td className="muted tabular">{i + 1}</td>
+                            <td className="tabular" style={{ fontWeight: 600, color: 'var(--ink)' }}>{c.ticket}</td>
+                            <td>{c.analyst_name || <span className="muted">Sin asignar</span>}</td>
+                            <td className="muted">{c.note || '—'}</td>
+                            <td><button className={'pill ' + (c.resolved ? 'green' : 'amber')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => toggleCase(c)}>{c.resolved ? 'Sí' : 'No'}</button></td>
+                            <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeCase(c.id)}>✕</button></td>
+                          </tr>
+                        ))}</tbody></table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        })}
     </>
   )
 }
