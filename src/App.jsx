@@ -121,12 +121,14 @@ export default function App() {
         <button className={tab === 'malla' ? 'on' : ''} onClick={() => setTab('malla')}>Malla horaria</button>
         <button className={tab === 'llegada' ? 'on' : ''} onClick={() => setTab('llegada')}>Reporte de llegada</button>
         <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas DOCUM</button>
+        <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>Productividad</button>
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
       </nav>
       <main className="wrap">
         {tab === 'malla' && <Malla email={email} isAdmin={actingAdmin} />}
         {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={actingAdmin} />}
         {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} />}
+        {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Base de datos en Supabase · acceso por Google Workspace</footer>
@@ -575,5 +577,243 @@ function Analistas() {
           </div>}
       <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length} analistas. El correo debe ser el real de Google de cada persona.</p>
     </div>
+  )
+}
+
+/* ================= PRODUCTIVIDAD + NOVEDADES ================= */
+const PROYECTOS = ['UGPP', 'Cimetrya', 'Core Positiva', 'CRM / Fiscalía', 'Tableros', 'Transición / NOC', 'Otro / General']
+const TIPOS_NOV = ['Diligenciamiento de data', 'Capacitación / Reunión', 'Gestión de caso', 'Informe', 'Otro']
+
+function Productividad({ email, name, isAdmin }) {
+  const [sub, setSub] = useState('detalle')
+  return (
+    <>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="tabs" style={{ background: 'transparent', borderBottom: '1px solid var(--line)', padding: '0 12px' }}>
+          <button style={subBtn(sub === 'detalle')} onClick={() => setSub('detalle')}>Detalle por analista</button>
+          <button style={subBtn(sub === 'novedades')} onClick={() => setSub('novedades')}>Novedades / Actividades extras</button>
+        </div>
+      </div>
+      {sub === 'detalle' && <DetalleProd isAdmin={isAdmin} />}
+      {sub === 'novedades' && <Novedades email={email} name={name} isAdmin={isAdmin} />}
+    </>
+  )
+}
+function subBtn(on) {
+  return { background: 'none', border: 'none', borderBottom: '2px solid ' + (on ? 'var(--indigo)' : 'transparent'),
+    color: on ? 'var(--ink)' : 'var(--muted)', padding: '12px 14px', fontSize: 14, fontWeight: 500, cursor: 'pointer' }
+}
+
+/* ---------- Detalle por analista + semáforo + carga por pegado ---------- */
+function DetalleProd({ isAdmin }) {
+  const [periodos, setPeriodos] = useState([])
+  const [periodo, setPeriodo] = useState('')
+  const [rows, setRows] = useState([])
+  const [showPaste, setShowPaste] = useState(false)
+  const [pasteText, setPasteText] = useState('')
+  const [pastePeriodo, setPastePeriodo] = useState('')
+  const [msg, setMsg] = useState(null)
+  const [filtro, setFiltro] = useState(null) // 'v' | 'a' | 'r' | null
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('productividad').select('*').order('analyst_name')
+    const all = data || []
+    const ps = [...new Set(all.map(r => r.periodo))].sort()
+    setPeriodos(ps)
+    const per = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
+    setPeriodo(per)
+    setRows(all.filter(r => r.periodo === per))
+  }, [periodo])
+  useEffect(() => { load() }, [load])
+
+  // cálculos
+  const calc = (r) => {
+    const meta = Number(r.meta) || 0, casos = Number(r.casos) || 0, dias = Number(r.dias) || 0
+    const cumpl = (meta > 0 && dias > 0) ? (casos / (meta * dias)) * 100 : null
+    const prom = dias > 0 ? casos / dias : null
+    return { cumpl, prom }
+  }
+  const estado = (c) => c == null ? ['slate', 'Sin dato', 's'] : c >= 100 ? ['green', 'Cumple', 'v'] : c >= 90 ? ['amber', 'Próximo', 'a'] : ['rose', 'No cumple', 'r']
+
+  const withCalc = rows.map(r => ({ ...r, ...calc(r), est: estado(calc(r).cumpl) }))
+  const shown = filtro ? withCalc.filter(r => r.est[2] === filtro) : withCalc
+  const nCumple = withCalc.filter(r => r.est[2] === 'v').length
+  const nProx = withCalc.filter(r => r.est[2] === 'a').length
+  const nNo = withCalc.filter(r => r.est[2] === 'r').length
+
+  const guardarPegado = async () => {
+    setMsg(null)
+    const per = pastePeriodo.trim()
+    if (!per) { setMsg({ t: 'err', m: 'Escribe el período (ej: Agosto 2026).' }); return }
+    // parsear: líneas, columnas separadas por TAB (Excel) o coma
+    const lineas = pasteText.split('\n').map(l => l.trim()).filter(Boolean)
+    const parsed = []
+    for (const l of lineas) {
+      const cols = l.includes('\t') ? l.split('\t') : l.split(/\s{2,}|,|;/)
+      const nombre = (cols[0] || '').trim()
+      if (!nombre || /analista/i.test(nombre)) continue // salta encabezado
+      const num = (x) => { const n = parseFloat(String(x || '').replace(/[^\d.,-]/g, '').replace(',', '.')); return isNaN(n) ? null : n }
+      parsed.push({ periodo: per, analyst_name: nombre, meta: num(cols[1]), casos: num(cols[2]), dias: num(cols[3]) })
+    }
+    if (parsed.length === 0) { setMsg({ t: 'err', m: 'No se detectaron filas. Copia desde Excel las columnas Analista, Meta, Casos, Días.' }); return }
+    // reemplaza el período: borra y vuelve a insertar
+    await supabase.from('productividad').delete().eq('periodo', per)
+    const { error } = await supabase.from('productividad').insert(parsed)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: `${parsed.length} analistas cargados en ${per}.` })
+    setPasteText(''); setShowPaste(false); setPeriodo(per); load()
+  }
+
+  const nf = (n) => n == null ? '—' : Number(n).toLocaleString('es-CO', { maximumFractionDigits: 1 })
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh">
+          <div><b>Detalle por analista</b><div className="muted sm">% Cumplimiento = Casos ÷ (Meta × Días) · Prom/día = Casos ÷ Días</div></div>
+          <div className="row">
+            {periodos.length > 0 && <select value={periodo} onChange={e => { setPeriodo(e.target.value); setFiltro(null) }}>
+              {periodos.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>}
+            {isAdmin && <button className="btn primary" onClick={() => { setShowPaste(v => !v); setPastePeriodo(periodo || '') }}>
+              {showPaste ? 'Cerrar' : 'Cargar / actualizar datos'}
+            </button>}
+          </div>
+        </div>
+
+        {isAdmin && showPaste && (
+          <div className="panel" style={{ marginTop: 0 }}>
+            <label className="f">Período<input placeholder="Ej: Agosto 2026" value={pastePeriodo} onChange={e => setPastePeriodo(e.target.value)} /></label>
+            <p className="muted sm" style={{ margin: '10px 0 6px' }}>
+              Copia desde tu documento (solo DOCUM) las 4 columnas <b>Analista · Meta · Casos · Días</b> y pégalas aquí:
+            </p>
+            <textarea rows={7} placeholder={"Daniel Munar\t20\t313\t13\nAngel Gomez\t20\t327\t13\n..."} value={pasteText} onChange={e => setPasteText(e.target.value)} style={{ fontFamily: 'monospace' }} />
+            {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 8 }}>{msg.m}</div>}
+            <button className="btn primary" style={{ marginTop: 10 }} onClick={guardarPegado}>Guardar datos</button>
+          </div>
+        )}
+        {!showPaste && msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      </div>
+
+      {/* Semáforo */}
+      {rows.length > 0 && (
+        <div className="card">
+          <div className="cardh"><b>Semáforo de cumplimiento</b><div className="muted sm">Cumple ≥100% · Próximo 90–99% · No cumple &lt;90%. Clic para filtrar.</div></div>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
+            {[['v', 'green', nCumple, 'Cumplen'], ['a', 'amber', nProx, 'Próximos'], ['r', 'rose', nNo, 'No cumplen']].map(s => (
+              <div key={s[0]} onClick={() => setFiltro(filtro === s[0] ? null : s[0])}
+                style={{ cursor: 'pointer', borderRadius: 10, padding: 14, textAlign: 'center',
+                  border: '2px solid ' + (filtro === s[0] ? 'var(--ink)' : 'transparent'),
+                  background: s[1] === 'green' ? '#ecfdf5' : s[1] === 'amber' ? '#fffbeb' : '#fff1f2' }}>
+                <div style={{ fontSize: 26, fontWeight: 700, color: s[1] === 'green' ? 'var(--emerald)' : s[1] === 'amber' ? 'var(--amber)' : 'var(--rose)' }}>{s[2]}</div>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{s[3]}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Tabla detalle */}
+      <div className="card">
+        <div className="cardh"><b>Analistas — {periodo || 'sin período'}</b>{filtro && <button className="btn ghost sm" onClick={() => setFiltro(null)}>Quitar filtro</button>}</div>
+        {shown.length === 0
+          ? <div className="empty">{isAdmin ? 'Sin datos. Usa «Cargar / actualizar datos» y pega desde tu documento.' : 'Aún no hay datos de productividad publicados.'}</div>
+          : <div className="scroll">
+              <table><thead><tr><th>Analista</th><th>Meta</th><th>Casos</th><th>Días</th><th>% Cumpl.</th><th>Prom/día</th><th>Estado</th></tr></thead>
+                <tbody>{shown.map(r => (
+                  <tr key={r.id}>
+                    <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{r.analyst_name}</td>
+                    <td className="tabular">{nf(r.meta)}</td><td className="tabular">{nf(r.casos)}</td><td className="tabular">{nf(r.dias)}</td>
+                    <td className="tabular"><b>{r.cumpl == null ? '—' : r.cumpl.toFixed(1) + '%'}</b></td>
+                    <td className="tabular">{r.prom == null ? '—' : r.prom.toFixed(1)}</td>
+                    <td><span className={'pill ' + (r.est[0] === 'slate' ? 'slate' : r.est[0])}>{r.est[1]}</span></td>
+                  </tr>
+                ))}</tbody></table>
+            </div>}
+        {shown.length > 0 && <p className="muted sm" style={{ marginTop: 8 }}>Mostrando {shown.length} analistas · {nf(shown.reduce((s, r) => s + (Number(r.casos) || 0), 0))} casos</p>}
+      </div>
+    </>
+  )
+}
+
+/* ---------- Novedades / Actividades extras ---------- */
+function Novedades({ email, name, isAdmin }) {
+  const [analysts, setAnalysts] = useState([])
+  const [items, setItems] = useState([])
+  const [form, setForm] = useState({ analystId: '', proyecto: PROYECTOS[0], tipo: TIPOS_NOV[0], novedad: '' })
+  const [fProy, setFProy] = useState('TODOS')
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data: a } = await supabase.from('analysts').select('*').order('name')
+    const { data: n } = await supabase.from('novedades').select('*').order('created_at', { ascending: false })
+    setAnalysts(a || []); setItems(n || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const registrar = async () => {
+    setMsg(null)
+    if (!form.novedad.trim()) { setMsg({ t: 'err', m: 'Escribe la novedad antes de registrar.' }); return }
+    const an = analysts.find(a => a.id === form.analystId)
+    const { error } = await supabase.from('novedades').insert({
+      analyst_email: an?.email || email, analyst_name: an?.name || name,
+      proyecto: form.proyecto, tipo: form.tipo, novedad: form.novedad.trim(), created_by: email,
+    })
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setForm({ ...form, novedad: '' }); setMsg({ t: 'ok', m: 'Novedad registrada.' }); load()
+  }
+  const remove = async (id) => { await supabase.from('novedades').delete().eq('id', id); load() }
+
+  const proyectos = [...new Set(items.map(i => i.proyecto).filter(Boolean))]
+  const shown = fProy === 'TODOS' ? items : items.filter(i => i.proyecto === fProy)
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh"><b>Registrar novedad / actividad extra</b><div className="muted sm">Lo que realizaste hoy fuera de la operación normal.</div></div>
+        <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))' }}>
+          <label className="f">Analista
+            <select value={form.analystId} onChange={e => setForm({ ...form, analystId: e.target.value })}>
+              <option value="">(yo)</option>{analysts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+          <label className="f">Proyecto
+            <select value={form.proyecto} onChange={e => setForm({ ...form, proyecto: e.target.value })}>{PROYECTOS.map(p => <option key={p}>{p}</option>)}</select>
+          </label>
+          <label className="f">Tipo
+            <select value={form.tipo} onChange={e => setForm({ ...form, tipo: e.target.value })}>{TIPOS_NOV.map(t => <option key={t}>{t}</option>)}</select>
+          </label>
+          <label className="f" style={{ gridColumn: '1/-1' }}>Novedad (qué realizó)
+            <input placeholder="Describe la novedad…" value={form.novedad} onChange={e => setForm({ ...form, novedad: e.target.value })} />
+          </label>
+        </div>
+        {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 10 }}>{msg.m}</div>}
+        <button className="btn primary" style={{ marginTop: 12 }} onClick={registrar}>Registrar novedad</button>
+      </div>
+
+      <div className="card">
+        <div className="cardh">
+          <div><b>Novedades registradas</b><div className="muted sm">{items.length} en total</div></div>
+          <select value={fProy} onChange={e => setFProy(e.target.value)}>
+            <option value="TODOS">Todos los proyectos</option>{proyectos.map(p => <option key={p}>{p}</option>)}
+          </select>
+        </div>
+        {shown.length === 0 ? <div className="empty">Sin novedades.</div> : (
+          <div className="scroll">
+            <table><thead><tr><th>Fecha</th><th>Analista</th><th>Proyecto</th><th>Tipo</th><th>Novedad</th>{isAdmin && <th></th>}</tr></thead>
+              <tbody>{shown.map(n => (
+                <tr key={n.id}>
+                  <td className="muted tabular">{n.fecha}</td>
+                  <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{n.analyst_name}</td>
+                  <td><span className="pill slate">{n.proyecto || '—'}</span></td>
+                  <td className="muted">{n.tipo || '—'}</td>
+                  <td>{n.novedad}</td>
+                  {isAdmin && <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(n.id)}>✕</button></td>}
+                </tr>
+              ))}</tbody></table>
+          </div>
+        )}
+      </div>
+    </>
   )
 }
