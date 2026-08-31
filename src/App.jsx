@@ -41,6 +41,7 @@ export default function App() {
   const [loginEmail, setLoginEmail] = useState('')
   const [sent, setSent] = useState(false)
   const [authErr, setAuthErr] = useState('')
+  const [verComoAnalista, setVerComoAnalista] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true) })
@@ -68,6 +69,9 @@ export default function App() {
   }
   const logout = () => supabase.auth.signOut()
 
+  // rol con el que se PINTA el portal (permite al admin "ver como analista")
+  const actingAdmin = isAdmin && !verComoAnalista
+
   if (!ready) return <div className="center muted">Cargando…</div>
 
   if (!session) return (
@@ -94,13 +98,22 @@ export default function App() {
     </Shell>
   )
 
+  // si estaba en una pestaña de admin y cambia a "ver como analista", lo devolvemos a malla
+  if (!actingAdmin && (tab === 'analistas')) setTab('malla')
+
   return (
     <div className="app">
       <header className="topbar">
         <div><div className="eyebrow">EQUIPO DOCUM</div><b>Portal de operación</b></div>
         <div className="userbox">
+          {isAdmin && (
+            <button className="btn ghost sm" style={{ border: '1px solid #334155', color: '#cbd5e1' }}
+              onClick={() => setVerComoAnalista(v => !v)}>
+              {verComoAnalista ? '↩ Volver a admin' : '👁 Ver como analista'}
+            </button>
+          )}
           <div className="uname">{name}</div>
-          <div className={'urole ' + (isAdmin ? 'admin' : 'analista')}>{isAdmin ? 'Administrador' : 'Analista'}</div>
+          <div className={'urole ' + (actingAdmin ? 'admin' : 'analista')}>{actingAdmin ? 'Administrador' : (verComoAnalista ? 'Analista (vista previa)' : 'Analista')}</div>
           <button className="btn ghost sm" onClick={logout}>Salir</button>
         </div>
       </header>
@@ -108,11 +121,13 @@ export default function App() {
         <button className={tab === 'malla' ? 'on' : ''} onClick={() => setTab('malla')}>Malla horaria</button>
         <button className={tab === 'llegada' ? 'on' : ''} onClick={() => setTab('llegada')}>Reporte de llegada</button>
         <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas DOCUM</button>
+        {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
       </nav>
       <main className="wrap">
-        {tab === 'malla' && <Malla email={email} isAdmin={isAdmin} />}
-        {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={isAdmin} />}
-        {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={isAdmin} />}
+        {tab === 'malla' && <Malla email={email} isAdmin={actingAdmin} />}
+        {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={actingAdmin} />}
+        {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} />}
+        {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Base de datos en Supabase · acceso por Google Workspace</footer>
     </div>
@@ -182,6 +197,15 @@ function Malla({ email, isAdmin }) {
     load()
   }
 
+  const borrarMes = async () => {
+    if (!confirm(`¿Borrar por completo la malla de ${monthLabel(month)}? Esta acción no se puede deshacer.`)) return
+    setBusy(true); setMsg('')
+    const { error } = await supabase.from('malla').delete().eq('month', month)
+    setBusy(false)
+    if (error) { setMsg('Error: ' + error.message); return }
+    setMsg(`Malla de ${monthLabel(month)} borrada.`); load()
+  }
+
   // agrupar por semana
   const byWeek = {}
   const map = {}
@@ -214,6 +238,8 @@ function Malla({ email, isAdmin }) {
               onClick={() => generar(months.length ? nextMonthOf(months[months.length - 1]) : curMonth())}>
               {busy ? 'Generando…' : `Generar ${monthLabel(months.length ? nextMonthOf(months[months.length - 1]) : curMonth())}`}
             </button>}
+            {isAdmin && rows.length > 0 && <button className="btn ghost" style={{ color: 'var(--rose)' }} disabled={busy}
+              onClick={borrarMes}>Borrar malla de {monthLabel(month)}</button>}
           </div>
         </div>
         {msg && <div className="notice">{msg}</div>}
@@ -493,5 +519,61 @@ function Problemas({ email, name, isAdmin }) {
           )
         })}
     </>
+  )
+}
+
+/* ================= ANALISTAS (solo admin) ================= */
+function Analistas() {
+  const [analysts, setAnalysts] = useState([])
+  const [form, setForm] = useState({ name: '', email: '' })
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('analysts').select('*').order('name')
+    setAnalysts(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const add = async () => {
+    setMsg(null)
+    const nm = form.name.trim(), em = form.email.trim().toLowerCase()
+    if (!nm || !em) return
+    if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em })
+    if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
+    setForm({ name: '', email: '' }); setMsg({ t: 'ok', m: 'Analista agregado.' }); load()
+  }
+  const remove = async (a) => {
+    if (!confirm(`¿Quitar a ${a.name} de la lista de analistas?`)) return
+    const { error } = await supabase.from('analysts').delete().eq('id', a.id)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    load()
+  }
+
+  return (
+    <div className="card">
+      <div className="cardh">
+        <div><b>Analistas del equipo</b><div className="muted sm">Agregar o quitar. Tras un cambio, regenera la malla del mes para que se reparta con la lista nueva.</div></div>
+      </div>
+      <div className="row" style={{ marginBottom: 8 }}>
+        <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+        <input type="email" placeholder="correo@3tcapital.co" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
+        <button className="btn primary" onClick={add} disabled={!form.name.trim() || !form.email.trim()}>Agregar</button>
+      </div>
+      {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      {analysts.length === 0
+        ? <div className="empty">Aún no hay analistas.</div>
+        : <div className="scroll" style={{ marginTop: 8 }}>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th></th></tr></thead>
+              <tbody>{analysts.map(a => (
+                <tr key={a.id}>
+                  <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
+                  <td className="muted">{a.email}</td>
+                  <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
+                </tr>
+              ))}</tbody></table>
+          </div>}
+      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length} analistas. El correo debe ser el real de Google de cada persona.</p>
+    </div>
   )
 }
