@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, DOMINIO } from './supabaseClient.js'
+import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
+const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
 /* ---------- constantes ---------- */
 const GRACE = 10
@@ -54,7 +55,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session) { setIsAdmin(false); setBlocked(false); return }
-    if (!email.endsWith('@' + DOMINIO)) { setBlocked(true); return }
+    if (!dominioOk(email)) { setBlocked(true); return }
     setBlocked(false)
     supabase.from('admins').select('email').eq('email', email).maybeSingle()
       .then(({ data }) => setIsAdmin(!!data))
@@ -63,7 +64,7 @@ export default function App() {
   const sendMagic = async () => {
     setAuthErr('')
     const em = loginEmail.trim().toLowerCase()
-    if (!em.endsWith('@' + DOMINIO)) { setAuthErr(`Debes usar tu correo @${DOMINIO}.`); return }
+    if (!dominioOk(em)) { setAuthErr(`Debes usar un correo de: ${DOMINIOS.map(d=>'@'+d).join(' o ')}.`); return }
     const { error } = await supabase.auth.signInWithOtp({ email: em, options: { emailRedirectTo: window.location.origin } })
     if (error) setAuthErr(error.message); else setSent(true)
   }
@@ -79,7 +80,7 @@ export default function App() {
       {sent
         ? <p className="muted">Te enviamos un <b>enlace de acceso</b> a <b>{loginEmail}</b>. Abre tu correo y haz clic en el enlace para entrar. Puedes cerrar esta pestaña.</p>
         : <>
-            <p className="muted">Ingresa con tu correo empresarial @{DOMINIO}. Te llegará un enlace de acceso a tu bandeja.</p>
+            <p className="muted">Ingresa con tu correo empresarial ({DOMINIOS.map(d=>'@'+d).join(' o ')}). Te llegará un enlace de acceso a tu bandeja.</p>
             <label className="f" style={{ marginTop: 10 }}>Correo empresarial
               <input type="email" placeholder={`usuario@${DOMINIO}`} value={loginEmail}
                 onChange={e => setLoginEmail(e.target.value)}
@@ -93,7 +94,7 @@ export default function App() {
 
   if (blocked) return (
     <Shell><h1>Acceso restringido</h1>
-      <p className="muted">Solo se permite el ingreso con correos <b>@{DOMINIO}</b>. Iniciaste con {email}.</p>
+      <p className="muted">Solo se permite el ingreso con correos de: <b>{DOMINIOS.map(d=>'@'+d).join(' o ')}</b>. Iniciaste con {email}.</p>
       <button className="btn ghost block" onClick={logout}>Cambiar de cuenta</button>
     </Shell>
   )
