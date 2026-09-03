@@ -43,6 +43,9 @@ export default function App() {
   const [sent, setSent] = useState(false)
   const [authErr, setAuthErr] = useState('')
   const [verComoAnalista, setVerComoAnalista] = useState(false)
+  const [misEquipos, setMisEquipos] = useState([])
+  const [allTeams, setAllTeams] = useState([])
+  const [equipo, setEquipo] = useState('')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true) })
@@ -57,8 +60,22 @@ export default function App() {
     if (!session) { setIsAdmin(false); setBlocked(false); return }
     if (!dominioOk(email)) { setBlocked(true); return }
     setBlocked(false)
-    supabase.from('admins').select('email').eq('email', email).maybeSingle()
-      .then(({ data }) => setIsAdmin(!!data))
+    ;(async () => {
+      const { data: adm } = await supabase.from('admins').select('email').eq('email', email).maybeSingle()
+      const { data: me } = await supabase.from('analysts').select('equipos,rol').eq('email', email).maybeSingle()
+      const esAdmin = !!adm || (me?.rol === 'admin')
+      setIsAdmin(esAdmin)
+      const { data: all } = await supabase.from('analysts').select('equipos')
+      const set = new Set()
+      ;(all || []).forEach(a => String(a.equipos || '').split(',').map(x => x.trim()).filter(Boolean).forEach(t => set.add(t)))
+      if (set.size === 0) set.add('DOCUM')
+      const teams = [...set].sort()
+      setAllTeams(teams)
+      const mine = esAdmin ? teams : String(me?.equipos || '').split(',').map(x => x.trim()).filter(Boolean)
+      const visibles = mine.length ? mine : (esAdmin ? teams : ['DOCUM'])
+      setMisEquipos(visibles)
+      setEquipo(prev => (prev && visibles.includes(prev)) ? prev : (visibles[0] || 'DOCUM'))
+    })()
   }, [session, email])
 
   const sendMagic = async () => {
@@ -107,6 +124,9 @@ export default function App() {
       <header className="topbar">
         <div><div className="eyebrow">EQUIPO DOCUM</div><b>Portal de operación</b></div>
         <div className="userbox">
+          {misEquipos.length > 0 && (misEquipos.length === 1
+            ? <span className="pill slate">{misEquipos[0]}</span>
+            : <select value={equipo} onChange={e => setEquipo(e.target.value)} style={{ padding: '6px 8px', borderRadius: 8 }}>{misEquipos.map(t => <option key={t} value={t}>{t}</option>)}</select>)}
           {isAdmin && (
             <button className="btn ghost sm" style={{ border: '1px solid #334155', color: '#cbd5e1' }}
               onClick={() => setVerComoAnalista(v => !v)}>
@@ -126,10 +146,10 @@ export default function App() {
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
       </nav>
       <main className="wrap">
-        {tab === 'malla' && <Malla email={email} isAdmin={actingAdmin} />}
-        {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={actingAdmin} />}
-        {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} />}
-        {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} />}
+        {tab === 'malla' && <Malla email={email} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Base de datos en Supabase · acceso por Google Workspace</footer>
@@ -142,7 +162,7 @@ function Shell({ children }) {
 }
 
 /* ================= MALLA ================= */
-function Malla({ email, isAdmin }) {
+function Malla({ email, isAdmin, equipo }) {
   const [month, setMonth] = useState(curMonth())
   const [months, setMonths] = useState([])
   const [rows, setRows] = useState([])
@@ -150,15 +170,16 @@ function Malla({ email, isAdmin }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
 
+  const enEquipo = a => String(a.equipos || 'DOCUM').split(',').map(x => x.trim()).includes(equipo)
   const load = useCallback(async () => {
-    const { data: ms } = await supabase.from('malla').select('month')
+    const { data: ms } = await supabase.from('malla').select('month').eq('equipo', equipo)
     const uniq = [...new Set((ms || []).map(r => r.month))].sort()
     setMonths(uniq)
-    const { data } = await supabase.from('malla').select('*').eq('month', month).order('work_date')
+    const { data } = await supabase.from('malla').select('*').eq('equipo', equipo).eq('month', month).order('work_date')
     setRows(data || [])
     const { data: an } = await supabase.from('analysts').select('*').order('name')
-    setAnalysts(an || [])
-  }, [month])
+    setAnalysts((an || []).filter(a => String(a.equipos || 'DOCUM').split(',').map(x => x.trim()).includes(equipo)))
+  }, [month, equipo])
   useEffect(() => { load() }, [load])
 
   const generar = async (targetMonth) => {
@@ -170,7 +191,7 @@ function Malla({ email, isAdmin }) {
     const nuevos = []
     const push = (iso, dow, a, tid) => {
       const p = SHIFTS[tid]
-      nuevos.push({ month: targetMonth, work_date: iso, analyst_email: a.email, analyst_name: a.name,
+      nuevos.push({ equipo, month: targetMonth, work_date: iso, analyst_email: a.email, analyst_name: a.name,
         turno_id: tid, ingreso: p.in, salida: p.out, almuerzo: p.lunch, ht: p.ht })
     }
     for (let d = 1; d <= days; d++) {
@@ -192,7 +213,7 @@ function Malla({ email, isAdmin }) {
         push(iso, dow, analysts[iSat], 't_sab')
       }
     }
-    await supabase.from('malla').delete().eq('month', targetMonth)
+    await supabase.from('malla').delete().eq('equipo', equipo).eq('month', targetMonth)
     const { error } = await supabase.from('malla').insert(nuevos)
     setBusy(false)
     if (error) { setMsg('Error: ' + error.message); return }
@@ -203,7 +224,7 @@ function Malla({ email, isAdmin }) {
   const borrarMes = async () => {
     if (!confirm(`¿Borrar por completo la malla de ${monthLabel(month)}? Esta acción no se puede deshacer.`)) return
     setBusy(true); setMsg('')
-    const { error } = await supabase.from('malla').delete().eq('month', month)
+    const { error } = await supabase.from('malla').delete().eq('equipo', equipo).eq('month', month)
     setBusy(false)
     if (error) { setMsg('Error: ' + error.message); return }
     setMsg(`Malla de ${monthLabel(month)} borrada.`); load()
@@ -292,7 +313,7 @@ function Malla({ email, isAdmin }) {
 }
 
 /* ================= LLEGADA ================= */
-function Llegada({ email, name, isAdmin }) {
+function Llegada({ email, name, isAdmin, equipo }) {
   const [arrivals, setArrivals] = useState([])
   const [targetEmail, setTargetEmail] = useState(isAdmin ? '' : email)
   const [pending, setPending] = useState(null)
@@ -300,9 +321,9 @@ function Llegada({ email, name, isAdmin }) {
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from('arrivals').select('*').order('work_date', { ascending: false }).order('llego', { ascending: false })
+    const { data } = await supabase.from('arrivals').select('*').eq('equipo', equipo).order('work_date', { ascending: false }).order('llego', { ascending: false })
     setArrivals(data || [])
-  }, [])
+  }, [equipo])
   useEffect(() => { load() }, [load])
 
   const check = async () => {
@@ -312,7 +333,7 @@ function Llegada({ email, name, isAdmin }) {
     const today = bogotaDateISO()
     const { data: dup } = await supabase.from('arrivals').select('id,llego,estado').eq('email', em).eq('work_date', today).maybeSingle()
     if (dup) { setMsg({ t: 'info', m: `Ya hay llegada hoy a las ${dup.llego} (${dup.estado}).` }); return }
-    const { data: mrow } = await supabase.from('malla').select('ingreso,analyst_name').eq('analyst_email', em).eq('work_date', today).maybeSingle()
+    const { data: mrow } = await supabase.from('malla').select('ingreso,analyst_name').eq('equipo', equipo).eq('analyst_email', em).eq('work_date', today).maybeSingle()
     const nowHM = bogotaHM(); const nowMin = toMin(nowHM)
     const expected = mrow?.ingreso || null
     const late = expected ? nowMin > toMin(expected) + GRACE : false
@@ -323,7 +344,7 @@ function Llegada({ email, name, isAdmin }) {
     if (!pending) return
     if (pending.late && !reason.trim()) { setMsg({ t: 'err', m: 'Indica el motivo de la llegada tarde.' }); return }
     const rec = {
-      work_date: bogotaDateISO(), email: pending.em, name: pending.name,
+      equipo, work_date: bogotaDateISO(), email: pending.em, name: pending.name,
       llego: pending.nowHM, esperado: pending.expected || '—',
       estado: pending.late ? 'tarde' : 'a tiempo', motivo: pending.late ? reason.trim() : null,
     }
@@ -390,7 +411,7 @@ function Llegada({ email, name, isAdmin }) {
 }
 
 /* ================= PROBLEMAS DOCUM ================= */
-function Problemas({ email, name, isAdmin }) {
+function Problemas({ email, name, isAdmin, equipo }) {
   const [problems, setProblems] = useState([])
   const [cases, setCases] = useState([])
   const [analysts, setAnalysts] = useState([])
@@ -402,18 +423,18 @@ function Problemas({ email, name, isAdmin }) {
   const [cf, setCf] = useState({ ticket: '', analystId: '', resolved: false, note: '' })
 
   const load = useCallback(async () => {
-    const { data: p } = await supabase.from('problems').select('*').order('created_at', { ascending: false })
+    const { data: p } = await supabase.from('problems').select('*').eq('equipo', equipo).order('created_at', { ascending: false })
     const { data: c } = await supabase.from('problem_cases').select('*').order('created_at', { ascending: true })
     const { data: a } = await supabase.from('analysts').select('*').order('name')
     setProblems(p || []); setCases(c || []); setAnalysts(a || [])
-  }, [])
+  }, [equipo])
   useEffect(() => { load() }, [load])
 
   const casesOf = (pid) => cases.filter(c => c.problem_id === pid)
 
   const addProblem = async () => {
     if (!title.trim()) return
-    const { error } = await supabase.from('problems').insert({ title: title.trim(), description: desc.trim(), created_by: email })
+    const { error } = await supabase.from('problems').insert({ equipo, title: title.trim(), description: desc.trim(), created_by: email })
     if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
     setTitle(''); setDesc(''); setMsg({ t: 'ok', m: 'Problema creado.' }); load()
   }
@@ -525,10 +546,10 @@ function Problemas({ email, name, isAdmin }) {
   )
 }
 
-/* ================= ANALISTAS (solo admin) ================= */
+/* ================= ANALISTAS / PERSONAS Y PROYECTOS (solo admin) ================= */
 function Analistas() {
   const [analysts, setAnalysts] = useState([])
-  const [form, setForm] = useState({ name: '', email: '' })
+  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista' })
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -540,52 +561,68 @@ function Analistas() {
   const add = async () => {
     setMsg(null)
     const nm = form.name.trim(), em = form.email.trim().toLowerCase()
+    const eq = (form.equipos.trim() || 'DOCUM').split(',').map(x => x.trim()).filter(Boolean).join(',')
     if (!nm || !em) return
     if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
-    const { error } = await supabase.from('analysts').insert({ name: nm, email: em })
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol })
     if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
-    setForm({ name: '', email: '' }); setMsg({ t: 'ok', m: 'Analista agregado.' }); load()
+    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
+  }
+  const save = async (a, patch) => {
+    const { error } = await supabase.from('analysts').update(patch).eq('id', a.id)
+    if (error) setMsg({ t: 'err', m: 'Error: ' + error.message }); else { setMsg({ t: 'ok', m: 'Cambio guardado.' }); load() }
   }
   const remove = async (a) => {
-    if (!confirm(`¿Quitar a ${a.name} de la lista de analistas?`)) return
-    const { error } = await supabase.from('analysts').delete().eq('id', a.id)
-    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
-    load()
+    if (!confirm(`¿Quitar a ${a.name}?`)) return
+    await supabase.from('analysts').delete().eq('id', a.id); load()
   }
+
+  const equiposExistentes = [...new Set(analysts.flatMap(a => String(a.equipos || '').split(',').map(x => x.trim()).filter(Boolean)))].sort()
 
   return (
     <div className="card">
       <div className="cardh">
-        <div><b>Analistas del equipo</b><div className="muted sm">Agregar o quitar. Tras un cambio, regenera la malla del mes para que se reparta con la lista nueva.</div></div>
+        <div><b>Personas y proyectos</b>
+          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
       </div>
-      <div className="row" style={{ marginBottom: 8 }}>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', marginBottom: 8 }}>
         <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
-        <input type="email" placeholder="correo@3tcapital.co" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
+        <input type="email" placeholder="correo@empresa.com" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
+        <input placeholder="Equipos (ej: DOCUM,Balu)" value={form.equipos} onChange={e => setForm({ ...form, equipos: e.target.value })} />
+        <select value={form.rol} onChange={e => setForm({ ...form, rol: e.target.value })}>
+          <option value="analista">Analista</option><option value="admin">Administrador</option>
+        </select>
         <button className="btn primary" onClick={add} disabled={!form.name.trim() || !form.email.trim()}>Agregar</button>
       </div>
       {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      {equiposExistentes.length > 0 && <p className="muted sm" style={{ marginTop: 6 }}>Equipos actuales: {equiposExistentes.join(' · ')}</p>}
       {analysts.length === 0
-        ? <div className="empty">Aún no hay analistas.</div>
+        ? <div className="empty">Aún no hay personas.</div>
         : <div className="scroll" style={{ marginTop: 8 }}>
-            <table><thead><tr><th>Nombre</th><th>Correo</th><th></th></tr></thead>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Rol</th><th></th></tr></thead>
               <tbody>{analysts.map(a => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
                   <td className="muted">{a.email}</td>
+                  <td><input defaultValue={a.equipos || 'DOCUM'} style={{ padding: '4px 8px', width: 150 }}
+                    onBlur={e => { const v = e.target.value.split(',').map(x => x.trim()).filter(Boolean).join(','); if (v !== (a.equipos || '')) save(a, { equipos: v || 'DOCUM' }) }} /></td>
+                  <td><select defaultValue={a.rol || 'analista'} style={{ padding: '4px 8px' }} onChange={e => save(a, { rol: e.target.value })}>
+                    <option value="analista">Analista</option><option value="admin">Administrador</option></select></td>
                   <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
                 </tr>
               ))}</tbody></table>
           </div>}
-      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length} analistas. El correo debe ser el real de Google de cada persona.</p>
+      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. El correo debe ser el real de Google. Edita "Equipos" (sale del campo para guardar) o "Rol" directamente en la tabla.</p>
     </div>
   )
 }
+
 
 /* ================= PRODUCTIVIDAD + NOVEDADES ================= */
 const PROYECTOS = ['UGPP', 'Cimetrya', 'Core Positiva', 'CRM / Fiscalía', 'Tableros', 'Transición / NOC', 'Otro / General']
 const TIPOS_NOV = ['Diligenciamiento de data', 'Capacitación / Reunión', 'Gestión de caso', 'Informe', 'Otro']
 
-function Productividad({ email, name, isAdmin }) {
+function Productividad({ email, name, isAdmin, equipo }) {
   const [sub, setSub] = useState('detalle')
   return (
     <>
@@ -595,8 +632,8 @@ function Productividad({ email, name, isAdmin }) {
           <button style={subBtn(sub === 'novedades')} onClick={() => setSub('novedades')}>Novedades / Actividades extras</button>
         </div>
       </div>
-      {sub === 'detalle' && <DetalleProd isAdmin={isAdmin} />}
-      {sub === 'novedades' && <Novedades email={email} name={name} isAdmin={isAdmin} />}
+      {sub === 'detalle' && <DetalleProd isAdmin={isAdmin} equipo={equipo} />}
+      {sub === 'novedades' && <Novedades email={email} name={name} isAdmin={isAdmin} equipo={equipo} />}
     </>
   )
 }
@@ -606,7 +643,7 @@ function subBtn(on) {
 }
 
 /* ---------- Detalle por analista (formato por días) ---------- */
-function DetalleProd({ isAdmin }) {
+function DetalleProd({ isAdmin, equipo }) {
   const [periodos, setPeriodos] = useState([])
   const [periodo, setPeriodo] = useState('')
   const [rows, setRows] = useState([])
@@ -617,14 +654,14 @@ function DetalleProd({ isAdmin }) {
   const [filtro, setFiltro] = useState(null)
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from('productividad').select('*').order('analyst_name')
+    const { data } = await supabase.from('productividad').select('*').eq('equipo', equipo).order('analyst_name')
     const all = data || []
     const ps = [...new Set(all.map(r => r.periodo))].sort()
     setPeriodos(ps)
     const per = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
     setPeriodo(per)
     setRows(all.filter(r => r.periodo === per))
-  }, [periodo])
+  }, [periodo, equipo])
   useEffect(() => { load() }, [load])
 
   // ---- cálculos por analista a partir de los días ----
@@ -681,10 +718,10 @@ function DetalleProd({ isAdmin }) {
         const n = parseFloat(raw.replace(/[^\d.,-]/g, '').replace(',', '.'))
         if (!isNaN(n)) dias[dayNum] = n
       }
-      parsed.push({ periodo: per, analyst_name: nombre, meta, dias })
+      parsed.push({ equipo, periodo: per, analyst_name: nombre, meta, dias })
     }
     if (parsed.length === 0) { setMsg({ t: 'err', m: 'No se detectaron filas. Copia: Analista, Meta y del día 1 al 31.' }); return }
-    await supabase.from('productividad').delete().eq('periodo', per)
+    await supabase.from('productividad').delete().eq('equipo', equipo).eq('periodo', per)
     const { error } = await supabase.from('productividad').insert(parsed)
     if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
     setMsg({ t: 'ok', m: `${parsed.length} analistas cargados en ${per}.` })
@@ -811,7 +848,7 @@ function MiniCurva({ serie, dias }) {
 
 
 /* ---------- Novedades / Actividades extras ---------- */
-function Novedades({ email, name, isAdmin }) {
+function Novedades({ email, name, isAdmin, equipo }) {
   const [analysts, setAnalysts] = useState([])
   const [items, setItems] = useState([])
   const [form, setForm] = useState({ analystId: '', proyecto: PROYECTOS[0], tipo: TIPOS_NOV[0], novedad: '' })
@@ -820,9 +857,9 @@ function Novedades({ email, name, isAdmin }) {
 
   const load = useCallback(async () => {
     const { data: a } = await supabase.from('analysts').select('*').order('name')
-    const { data: n } = await supabase.from('novedades').select('*').order('created_at', { ascending: false })
+    const { data: n } = await supabase.from('novedades').select('*').eq('equipo', equipo).order('created_at', { ascending: false })
     setAnalysts(a || []); setItems(n || [])
-  }, [])
+  }, [equipo])
   useEffect(() => { load() }, [load])
 
   const registrar = async () => {
@@ -830,7 +867,7 @@ function Novedades({ email, name, isAdmin }) {
     if (!form.novedad.trim()) { setMsg({ t: 'err', m: 'Escribe la novedad antes de registrar.' }); return }
     const an = analysts.find(a => a.id === form.analystId)
     const { error } = await supabase.from('novedades').insert({
-      analyst_email: an?.email || email, analyst_name: an?.name || name,
+      equipo, analyst_email: an?.email || email, analyst_name: an?.name || name,
       proyecto: form.proyecto, tipo: form.tipo, novedad: form.novedad.trim(), created_by: email,
     })
     if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
