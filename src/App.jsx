@@ -143,6 +143,7 @@ export default function App() {
         <button className={tab === 'llegada' ? 'on' : ''} onClick={() => setTab('llegada')}>Reporte de llegada</button>
         <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas DOCUM</button>
         <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>Productividad</button>
+        <button className={tab === 'zendesk' ? 'on' : ''} onClick={() => setTab('zendesk')}>Malla / Zendesk</button>
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
       </nav>
       <main className="wrap">
@@ -150,6 +151,7 @@ export default function App() {
         {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'zendesk' && <MallaOp email={email} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
@@ -929,5 +931,241 @@ function Novedades({ email, name, isAdmin, equipo }) {
         )}
       </div>
     </>
+  )
+}
+
+/* ================= MALLA OPERATIVA (pegado) + CORTE ZENDESK ================= */
+const normNom = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+const esTurno = v => { const t = String(v || '').trim(); return t !== '' && !/descanso|vacacion|licencia/i.test(t) }
+
+function MallaOp({ email, isAdmin, equipo }) {
+  const [sub, setSub] = useState('malla')
+  return (
+    <>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="tabs" style={{ background: 'transparent', borderBottom: '1px solid var(--line)', padding: '0 12px' }}>
+          <button style={subBtn(sub === 'malla')} onClick={() => setSub('malla')}>Malla del mes</button>
+          <button style={subBtn(sub === 'corte')} onClick={() => setSub('corte')}>Corte Zendesk</button>
+        </div>
+      </div>
+      {sub === 'malla' && <MallaOpMes email={email} isAdmin={isAdmin} equipo={equipo} />}
+      {sub === 'corte' && <CorteZendesk email={email} isAdmin={isAdmin} equipo={equipo} />}
+    </>
+  )
+}
+
+/* ---------- Carga y vista de la malla operativa ---------- */
+function MallaOpMes({ email, isAdmin, equipo }) {
+  const [periodos, setPeriodos] = useState([])
+  const [periodo, setPeriodo] = useState('')
+  const [rows, setRows] = useState([])
+  const [show, setShow] = useState(false)
+  const [txt, setTxt] = useState('')
+  const [per, setPer] = useState('')
+  const [ident, setIdent] = useState(4)
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('malla_op').select('*').eq('equipo', equipo).order('nombre')
+    const all = data || []
+    const ps = [...new Set(all.map(r => r.periodo))].sort()
+    setPeriodos(ps)
+    const p = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
+    setPeriodo(p); setRows(all.filter(r => r.periodo === p))
+  }, [periodo, equipo])
+  useEffect(() => { load() }, [load])
+
+  const guardar = async () => {
+    setMsg(null)
+    const pr = per.trim(); if (!pr) { setMsg({ t: 'err', m: 'Escribe el período (ej: Septiembre 2026).' }); return }
+    const lineas = txt.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim())
+    const parsed = []
+    for (const l of lineas) {
+      const cols = l.split('\t')
+      const nombre = (cols[0] || '').trim()
+      if (!nombre || /nombre\s*analista/i.test(nombre)) continue
+      const dias = {}
+      for (let i = ident; i < cols.length; i++) {
+        const v = String(cols[i] ?? '').trim()
+        if (v !== '') dias[i - ident + 1] = v
+      }
+      parsed.push({ equipo, periodo: pr, nombre, ubicacion: (cols[1] || '').trim(), area: (cols[2] || '').trim(), dias })
+    }
+    if (parsed.length === 0) { setMsg({ t: 'err', m: 'No se detectaron filas. Revisa que copiaste desde el nombre.' }); return }
+    await supabase.from('malla_op').delete().eq('equipo', equipo).eq('periodo', pr)
+    const { error } = await supabase.from('malla_op').insert(parsed)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: `${parsed.length} personas cargadas en ${pr}.` }); setTxt(''); setShow(false); setPeriodo(pr); load()
+  }
+
+  const maxDay = rows.reduce((m, r) => Math.max(m, ...Object.keys(r.dias || {}).map(Number)), 0)
+  const dayCols = Array.from({ length: maxDay }, (_, i) => i + 1)
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh">
+          <div><b>Malla operativa — {periodo || 'sin período'}</b><div className="muted sm">Malla de {equipo} cargada por pegado. Descanso/Vacaciones/Licencia se ven como texto.</div></div>
+          <div className="row">
+            {periodos.length > 0 && <select value={periodo} onChange={e => setPeriodo(e.target.value)}>{periodos.map(p => <option key={p} value={p}>{p}</option>)}</select>}
+            {isAdmin && <button className="btn primary" onClick={() => { setShow(v => !v); setPer(periodo || '') }}>{show ? 'Cerrar' : 'Cargar malla'}</button>}
+          </div>
+        </div>
+        {isAdmin && show && (
+          <div className="panel" style={{ marginTop: 0 }}>
+            <div className="row">
+              <label className="f" style={{ flex: 1 }}>Período<input placeholder="Ej: Septiembre 2026" value={per} onChange={e => setPer(e.target.value)} /></label>
+              <label className="f">Columnas antes de los días<input type="number" min="3" value={ident} onChange={e => setIdent(Number(e.target.value) || 4)} style={{ width: 90 }} /></label>
+            </div>
+            <p className="muted sm" style={{ margin: '10px 0 6px' }}>
+              Copia de tu Excel: <b>Nombre · Ubicación · Área · Líder · día 1 · día 2 · …</b> y pégalo aquí. (Por defecto se saltan 4 columnas de identidad antes de los días; ajústalo si tu hoja tiene otra cantidad.)
+            </p>
+            <textarea rows={8} value={txt} onChange={e => setTxt(e.target.value)} style={{ fontFamily: 'monospace', whiteSpace: 'pre' }}
+              placeholder={"Brayan Casanova\tCúcuta\tAtención\tJonathan\t08:00 a 17:00\t08:00 a 17:00\t..."} />
+            {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 8 }}>{msg.m}</div>}
+            <button className="btn primary" style={{ marginTop: 10 }} onClick={guardar}>Guardar malla</button>
+          </div>
+        )}
+        {!show && msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      </div>
+
+      {rows.length > 0 && (
+        <div className="card">
+          <div className="cardh"><b>{rows.length} personas</b></div>
+          <div className="scroll">
+            <table className="mtab">
+              <thead><tr><th className="left">Nombre</th><th>Ubicación</th><th>Área</th>{dayCols.map(d => <th key={d}>{d}</th>)}</tr></thead>
+              <tbody>{rows.map(r => (
+                <tr key={r.id}>
+                  <td className="left an">{r.nombre}</td>
+                  <td className="muted">{r.ubicacion || '—'}</td>
+                  <td className="muted">{r.area || '—'}</td>
+                  {dayCols.map(d => { const v = r.dias?.[d]; return <td key={d} style={{ whiteSpace: 'nowrap', color: esTurno(v) ? 'var(--ink)' : '#cbd5e1', fontSize: 11 }}>{v || '—'}</td> })}
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+/* ---------- Corte Zendesk: malla del día vs conectados ---------- */
+function CorteZendesk({ email, isAdmin, equipo }) {
+  const [periodos, setPeriodos] = useState([])
+  const [periodo, setPeriodo] = useState('')
+  const [mallaRows, setMallaRows] = useState([])
+  const [fecha, setFecha] = useState(bogotaDateISO())
+  const [hora, setHora] = useState('08:00')
+  const [conectados, setConectados] = useState('')
+  const [resultado, setResultado] = useState(null)
+  const [historial, setHistorial] = useState([])
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('malla_op').select('*').eq('equipo', equipo)
+    const all = data || []
+    const ps = [...new Set(all.map(r => r.periodo))].sort()
+    setPeriodos(ps)
+    const p = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
+    setPeriodo(p); setMallaRows(all.filter(r => r.periodo === p))
+    const { data: h } = await supabase.from('cortes').select('*').eq('equipo', equipo).order('created_at', { ascending: false })
+    setHistorial(h || [])
+  }, [periodo, equipo])
+  useEffect(() => { load() }, [load])
+
+  const comparar = () => {
+    setMsg(null); setResultado(null)
+    const dia = new Date(fecha + 'T12:00:00').getDate()
+    const enMalla = mallaRows.filter(r => esTurno(r.dias?.[dia])).map(r => ({ nombre: r.nombre, hora: r.dias[dia] }))
+    if (enMalla.length === 0) { setMsg({ t: 'err', m: `Nadie tiene turno el día ${dia} en la malla de ${periodo || 'este período'}. ¿Cargaste la malla y elegiste bien la fecha/período?` }); return }
+    const listaCon = conectados.split('\n').map(x => x.trim()).filter(Boolean)
+    const conSet = new Set(listaCon.map(normNom))
+    const mallaSet = new Set(enMalla.map(x => normNom(x.nombre)))
+    const presentes = enMalla.filter(x => conSet.has(normNom(x.nombre)))
+    const faltan = enMalla.filter(x => !conSet.has(normNom(x.nombre)))
+    const demas = listaCon.filter(n => !mallaSet.has(normNom(n)))
+    setResultado({ dia, presentes, faltan, demas, nMalla: enMalla.length, nCon: listaCon.length })
+  }
+
+  const guardarCorte = async () => {
+    if (!resultado) return
+    const rec = {
+      equipo, fecha, hora,
+      presentes: resultado.presentes.map(x => x.nombre), faltan: resultado.faltan.map(x => x.nombre), demas: resultado.demas,
+      n_malla: resultado.nMalla, n_conectados: resultado.nCon, n_presentes: resultado.presentes.length, created_by: email,
+    }
+    const { error } = await supabase.from('cortes').insert(rec)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: 'Corte guardado.' }); load()
+  }
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh"><div><b>Corte Zendesk vs Malla</b><div className="muted sm">Pega los conectados en Zendesk (un nombre por línea) y compara con la malla del día.</div></div>
+          {periodos.length > 0 && <select value={periodo} onChange={e => setPeriodo(e.target.value)}>{periodos.map(p => <option key={p} value={p}>{p}</option>)}</select>}
+        </div>
+        <div className="row end">
+          <label className="f">Fecha<input type="date" value={fecha} onChange={e => setFecha(e.target.value)} /></label>
+          <label className="f">Hora de corte<input value={hora} onChange={e => setHora(e.target.value)} style={{ width: 90 }} /></label>
+        </div>
+        <label className="f" style={{ marginTop: 10, display: 'block' }}>Conectados en Zendesk (uno por línea)
+          <textarea rows={7} value={conectados} onChange={e => setConectados(e.target.value)} placeholder={"Brayan Andrey Casanova Florez\nCecilia Catalina Galeano\n..."} />
+        </label>
+        {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 8 }}>{msg.m}</div>}
+        <button className="btn primary" style={{ marginTop: 10 }} onClick={comparar} disabled={!conectados.trim()}>Comparar</button>
+      </div>
+
+      {resultado && (
+        <>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', marginBottom: 18 }}>
+            {[['En malla (día ' + resultado.dia + ')', resultado.nMalla, 'var(--ink)'],
+              ['Conectados', resultado.nCon, 'var(--indigo)'],
+              ['Presentes', resultado.presentes.length, 'var(--emerald)'],
+              ['Faltan', resultado.faltan.length, 'var(--rose)']].map((k, i) => (
+              <div key={i} className="card" style={{ margin: 0, borderTop: '4px solid ' + k[2], padding: '14px 16px' }}>
+                <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase' }}>{k[0]}</div>
+                <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--ink)' }}>{k[1]}</div>
+              </div>
+            ))}
+          </div>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))' }}>
+            <ListaCorte titulo="✓ Presentes" color="green" items={resultado.presentes.map(x => x.nombre)} />
+            <ListaCorte titulo="✗ Faltan (en malla, no conectados)" color="rose" items={resultado.faltan.map(x => `${x.nombre}  ·  ${x.hora}`)} />
+            <ListaCorte titulo="Conectados de más (no en malla)" color="amber" items={resultado.demas} />
+          </div>
+          {isAdmin && <button className="btn primary" style={{ marginTop: 14 }} onClick={guardarCorte}>Guardar este corte</button>}
+        </>
+      )}
+
+      {historial.length > 0 && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <div className="cardh"><b>Cortes guardados</b><div className="muted sm">{historial.length} registros</div></div>
+          <div className="scroll">
+            <table><thead><tr><th>Fecha</th><th>Hora</th><th>En malla</th><th>Conectados</th><th>Presentes</th><th>Faltan</th></tr></thead>
+              <tbody>{historial.map(h => (
+                <tr key={h.id}>
+                  <td className="tabular muted">{h.fecha}</td><td className="tabular">{h.hora || '—'}</td>
+                  <td className="tabular">{h.n_malla}</td><td className="tabular">{h.n_conectados}</td>
+                  <td className="tabular" style={{ color: 'var(--emerald)' }}>{h.n_presentes}</td>
+                  <td><span className={'pill ' + ((h.n_malla - h.n_presentes) > 0 ? 'rose' : 'green')}>{h.n_malla - h.n_presentes}</span></td>
+                </tr>
+              ))}</tbody></table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+function ListaCorte({ titulo, color, items }) {
+  return (
+    <div className="card" style={{ margin: 0 }}>
+      <div className="cardh"><b>{titulo}</b><span className={'pill ' + color}>{items.length}</span></div>
+      {items.length === 0 ? <div className="muted sm">—</div>
+        : <div style={{ maxHeight: 300, overflow: 'auto' }}>{items.map((n, i) => <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid #f1f5f9', fontSize: 13 }}>{n}</div>)}</div>}
+    </div>
   )
 }
