@@ -549,7 +549,7 @@ function Problemas({ email, name, isAdmin, equipo }) {
 /* ================= ANALISTAS / PERSONAS Y PROYECTOS (solo admin) ================= */
 function Analistas() {
   const [analysts, setAnalysts] = useState([])
-  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista' })
+  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', skill: '' })
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -564,9 +564,9 @@ function Analistas() {
     const eq = (form.equipos.trim() || 'DOCUM').split(',').map(x => x.trim()).filter(Boolean).join(',')
     if (!nm || !em) return
     if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
-    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol })
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, skill: form.skill.trim() })
     if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
-    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
+    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
   }
   const save = async (a, patch) => {
     const { error } = await supabase.from('analysts').update(patch).eq('id', a.id)
@@ -589,6 +589,7 @@ function Analistas() {
         <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
         <input type="email" placeholder="correo@empresa.com" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
         <input placeholder="Equipos (ej: DOCUM,Balu)" value={form.equipos} onChange={e => setForm({ ...form, equipos: e.target.value })} />
+        <input placeholder="Skill (ej: Atencion, Gestion)" value={form.skill} onChange={e => setForm({ ...form, skill: e.target.value })} />
         <select value={form.rol} onChange={e => setForm({ ...form, rol: e.target.value })}>
           <option value="analista">Analista</option><option value="admin">Administrador</option>
         </select>
@@ -599,13 +600,15 @@ function Analistas() {
       {analysts.length === 0
         ? <div className="empty">Aún no hay personas.</div>
         : <div className="scroll" style={{ marginTop: 8 }}>
-            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Rol</th><th></th></tr></thead>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th></th></tr></thead>
               <tbody>{analysts.map(a => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
                   <td className="muted">{a.email}</td>
                   <td><input defaultValue={a.equipos || 'DOCUM'} style={{ padding: '4px 8px', width: 150 }}
                     onBlur={e => { const v = e.target.value.split(',').map(x => x.trim()).filter(Boolean).join(','); if (v !== (a.equipos || '')) save(a, { equipos: v || 'DOCUM' }) }} /></td>
+                  <td><input defaultValue={a.skill || ''} placeholder="—" style={{ padding: '4px 8px', width: 130 }}
+                    onBlur={e => { if (e.target.value.trim() !== (a.skill || '')) save(a, { skill: e.target.value.trim() }) }} /></td>
                   <td><select defaultValue={a.rol || 'analista'} style={{ padding: '4px 8px' }} onChange={e => save(a, { rol: e.target.value })}>
                     <option value="analista">Analista</option><option value="admin">Administrador</option></select></td>
                   <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
