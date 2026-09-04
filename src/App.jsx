@@ -141,7 +141,7 @@ export default function App() {
       <nav className="tabs">
         <button className={tab === 'malla' ? 'on' : ''} onClick={() => setTab('malla')}>Malla horaria</button>
         <button className={tab === 'llegada' ? 'on' : ''} onClick={() => setTab('llegada')}>Reporte de llegada</button>
-        <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas DOCUM</button>
+        <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas {equipo}</button>
         <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>Productividad</button>
         <button className={tab === 'zendesk' ? 'on' : ''} onClick={() => setTab('zendesk')}>Malla / Zendesk</button>
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
