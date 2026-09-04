@@ -1085,6 +1085,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
   const [resultado, setResultado] = useState(null)
   const [historial, setHistorial] = useState([])
   const [abierto, setAbierto] = useState(null)
+  const [proyAbierto, setProyAbierto] = useState(null)
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -1108,15 +1109,26 @@ function CorteZendesk({ email, isAdmin, equipo }) {
     // solo quienes YA deberían estar conectados a esa hora, según su rango de turno
     const enMalla = mallaRows
       .filter(r => esTurno(r.dias?.[dia]) && debeEstar(r.dias[dia], corteMin))
-      .map(r => ({ nombre: r.nombre, hora: r.dias[dia] }))
+      .map(r => ({ nombre: r.nombre, hora: r.dias[dia], area: (r.area || 'Sin área').trim() || 'Sin área' }))
     if (enMalla.length === 0) { setMsg({ t: 'err', m: `A las ${hora} del día ${dia} nadie debería estar según la malla de ${periodo || 'este período'}. Revisa fecha, hora y período.` }); return }
     const listaCon = conectados.split('\n').map(x => x.trim()).filter(Boolean)
     const conSet = new Set(listaCon.map(normNom))
     const mallaSet = new Set(enMalla.map(x => normNom(x.nombre)))
-    const presentes = enMalla.filter(x => conSet.has(normNom(x.nombre)))
-    const faltan = enMalla.filter(x => !conSet.has(normNom(x.nombre)))
+    const marcar = x => ({ ...x, conectado: conSet.has(normNom(x.nombre)) })
+    const gente = enMalla.map(marcar)
+    const presentes = gente.filter(x => x.conectado)
+    const faltan = gente.filter(x => !x.conectado)
     const demas = listaCon.filter(n => !mallaSet.has(normNom(n)))
-    setResultado({ dia, presentes, faltan, demas, nMalla: enMalla.length, nCon: listaCon.length })
+    // desglose por proyecto (área)
+    const areas = {}
+    gente.forEach(x => { const k = x.area; (areas[k] = areas[k] || { area: k, gente: [] }).gente.push(x) })
+    const porProyecto = Object.values(areas).map(g => ({
+      area: g.area, total: g.gente.length,
+      conectados: g.gente.filter(p => p.conectado).length,
+      faltan: g.gente.filter(p => !p.conectado).length,
+      gente: g.gente,
+    })).sort((a, b) => b.total - a.total)
+    setResultado({ dia, presentes, faltan, demas, gente, porProyecto, nMalla: enMalla.length, nCon: listaCon.length })
   }
 
   const borrarCorte = async (id) => {
@@ -1131,7 +1143,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
     const rec = {
       equipo, fecha, hora,
       presentes: resultado.presentes.map(x => x.nombre), faltan: resultado.faltan.map(x => x.nombre), demas: resultado.demas,
-      n_malla: resultado.nMalla, n_conectados: resultado.nCon, n_presentes: resultado.presentes.length, created_by: email,
+      por_proyecto: resultado.porProyecto, n_malla: resultado.nMalla, n_conectados: resultado.nCon, n_presentes: resultado.presentes.length, created_by: email,
     }
     const { error } = await supabase.from('cortes').insert(rec)
     if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
@@ -1167,6 +1179,32 @@ function CorteZendesk({ email, isAdmin, equipo }) {
                 <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--ink)' }}>{k[1]}</div>
               </div>
             ))}
+          </div>
+          <div className="card">
+            <div className="cardh"><b>Por proyecto</b><div className="muted sm">Clic en un proyecto para ver quiénes están y quiénes no.</div></div>
+            <div className="scroll">
+              <table><thead><tr><th>Proyecto</th><th>Debían estar</th><th>Conectados</th><th>Faltan</th></tr></thead>
+                <tbody>{resultado.porProyecto.map(p => (
+                  <Fragment key={p.area}>
+                    <tr style={{ cursor: 'pointer' }} onClick={() => setProyAbierto(proyAbierto === p.area ? null : p.area)}>
+                      <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{proyAbierto === p.area ? '▾ ' : '▸ '}{p.area}</td>
+                      <td className="tabular">{p.total}</td>
+                      <td className="tabular" style={{ color: 'var(--emerald)' }}>{p.conectados}</td>
+                      <td><span className={'pill ' + (p.faltan > 0 ? 'rose' : 'green')}>{p.faltan}</span></td>
+                    </tr>
+                    {proyAbierto === p.area && (
+                      <tr><td colSpan={4} style={{ background: '#f8fafc' }}>
+                        {p.gente.map((x, i) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #eef2f7', fontSize: 13 }}>
+                            <span>{x.conectado ? '✓ ' : '✗ '}{x.nombre} <span className="muted">· {x.hora}</span></span>
+                            <span className={'pill ' + (x.conectado ? 'green' : 'rose')} style={{ marginLeft: 8 }}>{x.conectado ? 'Conectado' : 'No conectado'}</span>
+                          </div>
+                        ))}
+                      </td></tr>
+                    )}
+                  </Fragment>
+                ))}</tbody></table>
+            </div>
           </div>
           <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))' }}>
             <ListaCorte titulo="✓ Presentes" color="green" items={resultado.presentes.map(x => x.nombre)} />
