@@ -81,7 +81,7 @@ export default function App() {
   const sendMagic = async () => {
     setAuthErr('')
     const em = loginEmail.trim().toLowerCase()
-    if (!dominioOk(em)) { setAuthErr(`Debes usar un correo de: ${DOMINIOS.map(d=>'@'+d).join(' o ')}.`); return }
+    if (!dominioOk(em)) { setAuthErr("Usa tu correo corporativo autorizado."); return }
     const { error } = await supabase.auth.signInWithOtp({ email: em, options: { emailRedirectTo: window.location.origin } })
     if (error) setAuthErr(error.message); else setSent(true)
   }
@@ -93,13 +93,13 @@ export default function App() {
   if (!ready) return <div className="center muted">Cargando…</div>
 
   if (!session) return (
-    <Shell><h1>Portal DOCUM</h1>
+    <Shell><h1>Bienvenido a la Mesa de Ayuda</h1>
       {sent
         ? <p className="muted">Te enviamos un <b>enlace de acceso</b> a <b>{loginEmail}</b>. Abre tu correo y haz clic en el enlace para entrar. Puedes cerrar esta pestaña.</p>
         : <>
-            <p className="muted">Ingresa con tu correo empresarial ({DOMINIOS.map(d=>'@'+d).join(' o ')}). Te llegará un enlace de acceso a tu bandeja.</p>
-            <label className="f" style={{ marginTop: 10 }}>Correo empresarial
-              <input type="email" placeholder={`usuario@${DOMINIO}`} value={loginEmail}
+            <p className="muted">Ingresa tu correo corporativo. Te llegará un enlace de acceso a tu bandeja.</p>
+            <label className="f" style={{ marginTop: 10 }}>Correo corporativo
+              <input type="email" placeholder="Ingresa tu correo corporativo" value={loginEmail}
                 onChange={e => setLoginEmail(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && sendMagic()} />
             </label>
@@ -111,7 +111,7 @@ export default function App() {
 
   if (blocked) return (
     <Shell><h1>Acceso restringido</h1>
-      <p className="muted">Solo se permite el ingreso con correos de: <b>{DOMINIOS.map(d=>'@'+d).join(' o ')}</b>. Iniciaste con {email}.</p>
+      <p className="muted">Tu correo no está habilitado para ingresar. Usa tu correo corporativo autorizado. Iniciaste con {email}.</p>
       <button className="btn ghost block" onClick={logout}>Cambiar de cuenta</button>
     </Shell>
   )
@@ -122,7 +122,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div><div className="eyebrow">EQUIPO DOCUM</div><b>Portal de operación</b></div>
+        <div><div className="eyebrow">MESA DE AYUDA</div><b>Centro de operación</b></div>
         <div className="userbox">
           {misEquipos.length > 0 && (misEquipos.length === 1
             ? <span className="pill slate">{misEquipos[0]}</span>
@@ -152,7 +152,7 @@ export default function App() {
         {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
-      <footer className="foot">Base de datos en Supabase · acceso por Google Workspace</footer>
+      <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
     </div>
   )
 }
