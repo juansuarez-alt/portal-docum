@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, Fragment } from 'react'
 import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
@@ -1061,6 +1061,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
   const [conectados, setConectados] = useState('')
   const [resultado, setResultado] = useState(null)
   const [historial, setHistorial] = useState([])
+  const [abierto, setAbierto] = useState(null)
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -1087,6 +1088,13 @@ function CorteZendesk({ email, isAdmin, equipo }) {
     const faltan = enMalla.filter(x => !conSet.has(normNom(x.nombre)))
     const demas = listaCon.filter(n => !mallaSet.has(normNom(n)))
     setResultado({ dia, presentes, faltan, demas, nMalla: enMalla.length, nCon: listaCon.length })
+  }
+
+  const borrarCorte = async (id) => {
+    if (!confirm('¿Eliminar este corte guardado?')) return
+    const { error } = await supabase.from('cortes').delete().eq('id', id)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    load()
   }
 
   const guardarCorte = async () => {
@@ -1144,14 +1152,26 @@ function CorteZendesk({ email, isAdmin, equipo }) {
         <div className="card" style={{ marginTop: 18 }}>
           <div className="cardh"><b>Cortes guardados</b><div className="muted sm">{historial.length} registros</div></div>
           <div className="scroll">
-            <table><thead><tr><th>Fecha</th><th>Hora</th><th>En malla</th><th>Conectados</th><th>Presentes</th><th>Faltan</th></tr></thead>
+            <table><thead><tr><th>Fecha</th><th>Hora</th><th>En malla</th><th>Conectados</th><th>Presentes</th><th>Faltan</th>{isAdmin && <th></th>}</tr></thead>
               <tbody>{historial.map(h => (
-                <tr key={h.id}>
-                  <td className="tabular muted">{h.fecha}</td><td className="tabular">{h.hora || '—'}</td>
+                <Fragment key={h.id}>
+                <tr style={{ cursor: 'pointer' }} onClick={() => setAbierto(abierto === h.id ? null : h.id)}>
+                  <td className="tabular muted">{abierto === h.id ? '▾ ' : '▸ '}{h.fecha}</td><td className="tabular">{h.hora || '—'}</td>
                   <td className="tabular">{h.n_malla}</td><td className="tabular">{h.n_conectados}</td>
                   <td className="tabular" style={{ color: 'var(--emerald)' }}>{h.n_presentes}</td>
                   <td><span className={'pill ' + ((h.n_malla - h.n_presentes) > 0 ? 'rose' : 'green')}>{h.n_malla - h.n_presentes}</span></td>
+                  {isAdmin && <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={(e) => { e.stopPropagation(); borrarCorte(h.id) }}>Eliminar</button></td>}
                 </tr>
+                {abierto === h.id && (
+                  <tr><td colSpan={isAdmin ? 7 : 6} style={{ background: '#f8fafc' }}>
+                    <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', padding: '6px 0' }}>
+                      <ListaCorte titulo="✓ Presentes" color="green" items={h.presentes || []} />
+                      <ListaCorte titulo="✗ Faltan" color="rose" items={h.faltan || []} />
+                      <ListaCorte titulo="Conectados de más" color="amber" items={h.demas || []} />
+                    </div>
+                  </td></tr>
+                )}
+                </Fragment>
               ))}</tbody></table>
           </div>
         </div>
