@@ -938,6 +938,29 @@ function Novedades({ email, name, isAdmin, equipo }) {
 const normNom = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
 const esTurno = v => { const t = String(v || '').trim(); return t !== '' && !/descanso|vacacion|licencia/i.test(t) }
 
+const BUFFER_SALIDA = 10 // se desconectan 10 min antes de salir
+
+// Extrae [entradaMin, salidaMin] de un texto tipo "08:00 a 17:00" (o "8:00-17:00"). Nocheros: salida < entrada => +24h.
+function parseRango(txt) {
+  const m = String(txt || '').match(/(\d{1,2})[:.](\d{2})\s*(?:a|-|—|to)\s*(\d{1,2})[:.](\d{2})/i)
+  if (!m) return null
+  let ini = (+m[1]) * 60 + (+m[2])
+  let fin = (+m[3]) * 60 + (+m[4])
+  if (fin <= ini) fin += 24 * 60 // cruza medianoche
+  return [ini, fin]
+}
+// ¿A la hora de corte (minutos) esta persona debería estar conectada, según su rango?
+function debeEstar(txtTurno, corteMin) {
+  const r = parseRango(txtTurno); if (!r) return false
+  const [ini, fin] = r
+  const finReal = fin - BUFFER_SALIDA
+  // consideramos también el caso nochero: probar el corte tal cual y +24h
+  for (const c of [corteMin, corteMin + 24 * 60]) {
+    if (c >= ini && c < finReal) return true
+  }
+  return false
+}
+
 function MallaOp({ email, isAdmin, equipo }) {
   const [sub, setSub] = useState('malla')
   return (
@@ -1079,8 +1102,14 @@ function CorteZendesk({ email, isAdmin, equipo }) {
   const comparar = () => {
     setMsg(null); setResultado(null)
     const dia = new Date(fecha + 'T12:00:00').getDate()
-    const enMalla = mallaRows.filter(r => esTurno(r.dias?.[dia])).map(r => ({ nombre: r.nombre, hora: r.dias[dia] }))
-    if (enMalla.length === 0) { setMsg({ t: 'err', m: `Nadie tiene turno el día ${dia} en la malla de ${periodo || 'este período'}. ¿Cargaste la malla y elegiste bien la fecha/período?` }); return }
+    const hm = String(hora || '').match(/(\d{1,2})[:.](\d{2})/)
+    if (!hm) { setMsg({ t: 'err', m: 'Escribe la hora de corte en formato 24h, ej: 09:50 o 21:50.' }); return }
+    const corteMin = (+hm[1]) * 60 + (+hm[2])
+    // solo quienes YA deberían estar conectados a esa hora, según su rango de turno
+    const enMalla = mallaRows
+      .filter(r => esTurno(r.dias?.[dia]) && debeEstar(r.dias[dia], corteMin))
+      .map(r => ({ nombre: r.nombre, hora: r.dias[dia] }))
+    if (enMalla.length === 0) { setMsg({ t: 'err', m: `A las ${hora} del día ${dia} nadie debería estar según la malla de ${periodo || 'este período'}. Revisa fecha, hora y período.` }); return }
     const listaCon = conectados.split('\n').map(x => x.trim()).filter(Boolean)
     const conSet = new Set(listaCon.map(normNom))
     const mallaSet = new Set(enMalla.map(x => normNom(x.nombre)))
@@ -1112,12 +1141,12 @@ function CorteZendesk({ email, isAdmin, equipo }) {
   return (
     <>
       <div className="card">
-        <div className="cardh"><div><b>Corte Zendesk vs Malla</b><div className="muted sm">Pega los conectados en Zendesk (un nombre por línea) y compara con la malla del día.</div></div>
+        <div className="cardh"><div><b>Corte Zendesk vs Malla</b><div className="muted sm">Compara a UNA hora exacta (24h): quién debía estar conectado según su turno vs. los conectados en Zendesk.</div></div>
           {periodos.length > 0 && <select value={periodo} onChange={e => setPeriodo(e.target.value)}>{periodos.map(p => <option key={p} value={p}>{p}</option>)}</select>}
         </div>
         <div className="row end">
           <label className="f">Fecha<input type="date" value={fecha} onChange={e => setFecha(e.target.value)} /></label>
-          <label className="f">Hora de corte<input value={hora} onChange={e => setHora(e.target.value)} style={{ width: 90 }} /></label>
+          <label className="f">Hora de corte (24h)<input value={hora} onChange={e => setHora(e.target.value)} placeholder="09:50" style={{ width: 100 }} /></label>
         </div>
         <label className="f" style={{ marginTop: 10, display: 'block' }}>Conectados en Zendesk (uno por línea)
           <textarea rows={7} value={conectados} onChange={e => setConectados(e.target.value)} placeholder={"Brayan Andrey Casanova Florez\nCecilia Catalina Galeano\n..."} />
@@ -1129,7 +1158,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
       {resultado && (
         <>
           <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', marginBottom: 18 }}>
-            {[['En malla (día ' + resultado.dia + ')', resultado.nMalla, 'var(--ink)'],
+            {[['Debían estar (' + hora + ')', resultado.nMalla, 'var(--ink)'],
               ['Conectados', resultado.nCon, 'var(--indigo)'],
               ['Presentes', resultado.presentes.length, 'var(--emerald)'],
               ['Faltan', resultado.faltan.length, 'var(--rose)']].map((k, i) => (
