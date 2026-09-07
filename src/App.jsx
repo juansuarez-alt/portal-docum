@@ -936,6 +936,19 @@ function Novedades({ email, name, isAdmin, equipo }) {
 
 /* ================= MALLA OPERATIVA (pegado) + CORTE ZENDESK ================= */
 const normNom = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+// palabras "útiles" de un nombre (ignora conectores y palabras muy cortas)
+const IGNORAR = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'san'])
+const palabrasNombre = s => normNom(s).split(' ').filter(w => w.length >= 3 && !IGNORAR.has(w))
+// ¿dos nombres son la misma persona? coinciden si comparten al menos 2 palabras
+function mismoNombre(a, b) {
+  const A = palabrasNombre(a), B = new Set(palabrasNombre(b))
+  const comunes = A.filter(w => B.has(w))
+  return comunes.length >= 2
+}
+// ¿el nombre de la malla está entre los conectados (lista de nombres)?
+function estaConectado(nombreMalla, listaConectados) {
+  return listaConectados.some(c => mismoNombre(nombreMalla, c))
+}
 const esTurno = v => { const t = String(v || '').trim(); return t !== '' && !/descanso|vacacion|licencia/i.test(t) }
 
 const BUFFER_SALIDA = 10 // se desconectan 10 min antes de salir
@@ -1112,13 +1125,12 @@ function CorteZendesk({ email, isAdmin, equipo }) {
       .map(r => ({ nombre: r.nombre, hora: r.dias[dia], area: (r.area || 'Sin área').trim() || 'Sin área' }))
     if (enMalla.length === 0) { setMsg({ t: 'err', m: `A las ${hora} del día ${dia} nadie debería estar según la malla de ${periodo || 'este período'}. Revisa fecha, hora y período.` }); return }
     const listaCon = conectados.split('\n').map(x => x.trim()).filter(Boolean)
-    const conSet = new Set(listaCon.map(normNom))
-    const mallaSet = new Set(enMalla.map(x => normNom(x.nombre)))
-    const marcar = x => ({ ...x, conectado: conSet.has(normNom(x.nombre)) })
+    const marcar = x => ({ ...x, conectado: estaConectado(x.nombre, listaCon) })
     const gente = enMalla.map(marcar)
     const presentes = gente.filter(x => x.conectado)
     const faltan = gente.filter(x => !x.conectado)
-    const demas = listaCon.filter(n => !mallaSet.has(normNom(n)))
+    // conectados que no cruzaron con nadie de la malla del turno
+    const demas = listaCon.filter(c => !enMalla.some(x => mismoNombre(x.nombre, c)))
     // desglose por proyecto (área)
     const areas = {}
     gente.forEach(x => { const k = x.area; (areas[k] = areas[k] || { area: k, gente: [] }).gente.push(x) })
@@ -1173,7 +1185,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
             {[['Debían estar (' + hora + ')', resultado.nMalla, 'var(--ink)'],
               ['Conectados', resultado.nCon, 'var(--indigo)'],
               ['Presentes', resultado.presentes.length, 'var(--emerald)'],
-              ['Faltan', resultado.faltan.length, 'var(--rose)']].map((k, i) => (
+              ['No conectados', resultado.faltan.length, 'var(--rose)']].map((k, i) => (
               <div key={i} className="card" style={{ margin: 0, borderTop: '4px solid ' + k[2], padding: '14px 16px' }}>
                 <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase' }}>{k[0]}</div>
                 <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--ink)' }}>{k[1]}</div>
@@ -1183,7 +1195,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
           <div className="card">
             <div className="cardh"><b>Por proyecto</b><div className="muted sm">Clic en un proyecto para ver quiénes están y quiénes no.</div></div>
             <div className="scroll">
-              <table><thead><tr><th>Proyecto</th><th>Debían estar</th><th>Conectados</th><th>Faltan</th></tr></thead>
+              <table><thead><tr><th>Proyecto</th><th>Debían estar</th><th>Conectados</th><th>No conectados</th></tr></thead>
                 <tbody>{resultado.porProyecto.map(p => (
                   <Fragment key={p.area}>
                     <tr style={{ cursor: 'pointer' }} onClick={() => setProyAbierto(proyAbierto === p.area ? null : p.area)}>
@@ -1208,7 +1220,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
           </div>
           <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))' }}>
             <ListaCorte titulo="✓ Presentes" color="green" items={resultado.presentes.map(x => x.nombre)} />
-            <ListaCorte titulo="✗ Faltan (en malla, no conectados)" color="rose" items={resultado.faltan.map(x => `${x.nombre}  ·  ${x.hora}`)} />
+            <ListaCorte titulo="✗ No conectados (debían estar)" color="rose" items={resultado.faltan.map(x => `${x.nombre}  ·  ${x.hora}`)} />
             <ListaCorte titulo="Conectados de más (no en malla)" color="amber" items={resultado.demas} />
           </div>
           {isAdmin && <button className="btn primary" style={{ marginTop: 14 }} onClick={guardarCorte}>Guardar este corte</button>}
@@ -1219,7 +1231,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
         <div className="card" style={{ marginTop: 18 }}>
           <div className="cardh"><b>Cortes guardados</b><div className="muted sm">{historial.length} registros</div></div>
           <div className="scroll">
-            <table><thead><tr><th>Fecha</th><th>Hora</th><th>En malla</th><th>Conectados</th><th>Presentes</th><th>Faltan</th>{isAdmin && <th></th>}</tr></thead>
+            <table><thead><tr><th>Fecha</th><th>Hora</th><th>En malla</th><th>Conectados</th><th>Presentes</th><th>No conectados</th>{isAdmin && <th></th>}</tr></thead>
               <tbody>{historial.map(h => (
                 <Fragment key={h.id}>
                 <tr style={{ cursor: 'pointer' }} onClick={() => setAbierto(abierto === h.id ? null : h.id)}>
@@ -1233,7 +1245,7 @@ function CorteZendesk({ email, isAdmin, equipo }) {
                   <tr><td colSpan={isAdmin ? 7 : 6} style={{ background: '#f8fafc' }}>
                     <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', padding: '6px 0' }}>
                       <ListaCorte titulo="✓ Presentes" color="green" items={h.presentes || []} />
-                      <ListaCorte titulo="✗ Faltan" color="rose" items={h.faltan || []} />
+                      <ListaCorte titulo="✗ No conectados" color="rose" items={h.faltan || []} />
                       <ListaCorte titulo="Conectados de más" color="amber" items={h.demas || []} />
                     </div>
                   </td></tr>
