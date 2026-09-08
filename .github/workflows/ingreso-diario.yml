@@ -1,1 +1,48 @@
 
+name: DOCUM · Ingreso diario
+
+# Corre todos los días a las 11:00 UTC = 06:00 Colombia, procesando el día anterior.
+# También se puede lanzar a mano desde la pestaña Actions (con fecha o rango opcional).
+on:
+  schedule:
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Día puntual YYYY-MM-DD (opcional; vacío = ayer)"
+        required: false
+      backfill_from:
+        description: "Backfill desde YYYY-MM-DD (opcional)"
+        required: false
+      backfill_to:
+        description: "Backfill hasta YYYY-MM-DD (opcional)"
+        required: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Sincronizar ingreso DOCUM
+        env:
+          ZENDESK_SUBDOMAIN: ${{ secrets.ZENDESK_SUBDOMAIN }}
+          ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
+          ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -n "${{ github.event.inputs.backfill_from }}" ]; then
+            python scripts/sync_ingreso.py --backfill "${{ github.event.inputs.backfill_from }}" "${{ github.event.inputs.backfill_to }}"
+          elif [ -n "${{ github.event.inputs.date }}" ]; then
+            python scripts/sync_ingreso.py --date "${{ github.event.inputs.date }}"
+          else
+            python scripts/sync_ingreso.py
+          fi
