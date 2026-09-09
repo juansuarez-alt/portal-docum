@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, Fragment } from 'react'
 import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
+import IngresoDiario from './IngresoDiario.jsx'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
 /* ---------- constantes ---------- */
@@ -144,6 +145,7 @@ export default function App() {
         <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas {equipo}</button>
         <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>Productividad</button>
         <button className={tab === 'zendesk' ? 'on' : ''} onClick={() => setTab('zendesk')}>Malla / Zendesk</button>
+        <button className={tab === 'ingreso' ? 'on' : ''} onClick={() => setTab('ingreso')}>Ingreso diario</button>
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
       </nav>
       <main className="wrap">
@@ -152,6 +154,7 @@ export default function App() {
         {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'zendesk' && <MallaOp email={email} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'ingreso' && <IngresoDiario />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
