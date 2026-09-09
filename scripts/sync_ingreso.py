@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Portal DOCUM · Sincronización de Ingreso Diario  (v2)
+Portal DOCUM · Sincronización de Ingreso Diario  (v3)
 ──────────────────────────────────────────────────────
-Igual que la v1, pero además guarda una MUESTRA de asuntos/descripciones
+Igual que la v2, pero además guarda el conteo de SUB-FLUJOS (subcasuísticas).
+También guarda una MUESTRA de asuntos/descripciones
 representativos por flujo y por tema, para que el análisis por IA pueda
 explicar causas y proponer soluciones (no solo repetir conteos).
 
@@ -102,6 +103,7 @@ def aggregate(tickets, dia):
     flujo = defaultdict(int); tipo = defaultdict(int); categoria = defaultdict(int)
     grupo = defaultdict(int); sla = defaultdict(int); temas = {k: 0 for k in TEMAS}
     m_flujo = defaultdict(list); m_tema = defaultdict(list)
+    subflujo = defaultdict(int)
     total = escalado = sla_venc = 0
 
     for t in tickets:
@@ -115,6 +117,7 @@ def aggregate(tickets, dia):
         flujo[fl] += 1
         tipo[(fields.get(F_TIPO) or "sin_tipo")] += 1
         categoria[(fields.get(F_CATEGORIA) or "sin_categoria")] += 1
+        subflujo[(fields.get(F_SUBFLUJO) or "sin_subflujo")] += 1
 
         g_raw = (fields.get(F_TRASPASO) or "").strip()
         g = g_raw.split(" | ")[0].strip() if g_raw else "(sin dato)"
@@ -147,6 +150,7 @@ def aggregate(tickets, dia):
         "total": total, "escalado": escalado, "no_escalado": total - escalado,
         "sla_vencidos": sla_venc,
         "flujo": dict(flujo), "tipo": dict(tipo), "categoria": dict(categoria),
+        "subflujo": dict(subflujo),
         "grupo": dict(grupo), "sla": dict(sla), "temas": temas,
         "muestra": {"flujo": dict(m_flujo), "tema": dict(m_tema)},
     }
