@@ -1,23 +1,18 @@
-
 #!/usr/bin/env python3
 """
-Portal DOCUM · Sincronización de Ingreso Diario
-────────────────────────────────────────────────
-Lee los tickets de la marca DOCUM en Zendesk, calcula los agregados de
-ingreso del día (total, escalado, por flujo/categoría/tipo/grupo/SLA y temas)
-y hace UPSERT en la tabla `docum_ingreso_diario` de Supabase.
+Portal DOCUM · Sincronización de Ingreso Diario  (v2)
+──────────────────────────────────────────────────────
+Igual que la v1, pero además guarda una MUESTRA de asuntos/descripciones
+representativos por flujo y por tema, para que el análisis por IA pueda
+explicar causas y proponer soluciones (no solo repetir conteos).
 
 Uso:
-  python sync_ingreso.py                       # procesa AYER (hora Colombia)
-  python sync_ingreso.py --date 2026-09-08     # un día puntual
-  python sync_ingreso.py --backfill 2026-09-01 2026-09-08   # rango (re-ejecutable)
+  python sync_ingreso.py
+  python sync_ingreso.py --date 2026-09-08
+  python sync_ingreso.py --backfill 2026-09-01 2026-09-08
 
-Requiere variables de entorno (ver README / secrets del GitHub Action):
-  ZENDESK_SUBDOMAIN            p.ej. soportemesadeayuda
-  ZENDESK_EMAIL               correo del agente dueño del token
-  ZENDESK_API_TOKEN           API token de Zendesk
-  SUPABASE_URL                https://xxxx.supabase.co
-  SUPABASE_SERVICE_ROLE_KEY   service_role key (NO la anon)
+Variables de entorno: ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, ZENDESK_API_TOKEN,
+SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 """
 import os, sys, argparse, datetime as dt
 from collections import defaultdict
@@ -27,20 +22,19 @@ import requests
 BOGOTA = ZoneInfo("America/Bogota")
 BRAND_ID = "47948014325787"
 
-# ── IDs de campos personalizados DOCUM (confirmados en Zendesk) ──
-F_CATEGORIA      = 48014210120091   # Docum :: Atención al Cliente : Categoría
-F_FLUJO          = 48024959818139   # Docum :: Atención al Cliente : Flujo (lado agente)
-F_FLUJO_WIDGET   = 50331399018395   # Docum :: Widget : Flujo  (valores *_clone)
-F_SUBFLUJO       = 48028168084635   # Docum :: Atención al Cliente : Sub-Flujos
-F_TIPO           = 51332842321179   # DOCUM :: Atención al Cliente : Tipo de Caso
-F_TRASPASO       = 50592625412763   # General :: Última fecha de traspaso a Grupo
-F_SLA_GRUPO      = 50882879330203   # General :: Alerta: SLA Grupo
+F_CATEGORIA    = 48014210120091
+F_FLUJO        = 48024959818139
+F_FLUJO_WIDGET = 50331399018395
+F_SUBFLUJO     = 48028168084635
+F_TIPO         = 51332842321179
+F_TRASPASO     = 50592625412763
+F_SLA_GRUPO    = 50882879330203
 
-GRUPOS_N3 = {"N3 - Desarrollo", "N3 - Data"}   # traspaso a estos grupos = escalado
+GRUPOS_N3 = {"N3 - Desarrollo", "N3 - Data"}
 SLA_VENCIDO = {"Se Vencio", "Vencido"}
 DOW_ES = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
 
-TEMAS = {  # detección temática por texto (subject + descripción + sub-flujo + tags)
+TEMAS = {
     "testigos": ["testigo"],
     "reclasificacion": ["reclasific"],
     "reasignacion": ["reasign"],
@@ -48,6 +42,10 @@ TEMAS = {  # detección temática por texto (subject + descripción + sub-flujo 
     "radicado_asociado": ["radicado asociado"],
     "clonado": ["clonad"],
 }
+
+# ── Parámetros de la muestra de textos ──
+MUESTRA_CAP = 8      # máx. de ejemplos por flujo / por tema
+MUESTRA_LEN = 200    # máx. de caracteres por ejemplo
 
 
 def env(name):
@@ -58,7 +56,6 @@ def env(name):
 
 
 def zendesk_pull(created_from_utc):
-    """Trae tickets DOCUM creados desde `created_from_utc` (buffer), paginando."""
     sub = env("ZENDESK_SUBDOMAIN")
     auth = (f'{env("ZENDESK_EMAIL")}/token', env("ZENDESK_API_TOKEN"))
     query = f"type:ticket brand:{BRAND_ID} created>={created_from_utc:%Y-%m-%d}"
@@ -78,7 +75,6 @@ def zendesk_pull(created_from_utc):
 
 
 def cf(ticket):
-    """Devuelve {field_id: value} de los custom_fields del ticket."""
     return {c["id"]: (c.get("value") or "") for c in ticket.get("custom_fields", [])}
 
 
@@ -86,7 +82,7 @@ def flujo_de(fields, tags):
     f = (fields.get(F_FLUJO) or "").strip()
     if f:
         return f
-    w = (fields.get(F_FLUJO_WIDGET) or "").strip()   # p.ej. 'pqrd_clone'
+    w = (fields.get(F_FLUJO_WIDGET) or "").strip()
     if w.endswith("_clone"):
         return w[:-6]
     for t in tags:
@@ -95,10 +91,17 @@ def flujo_de(fields, tags):
     return "sin_flujo"
 
 
+def snippet(t):
+    s = (t.get("subject") or "").strip()
+    d = (t.get("description") or "").strip().replace("\n", " ")
+    txt = f"{s} — {d}" if s and d else (s or d)
+    return " ".join(txt.split())[:MUESTRA_LEN]
+
+
 def aggregate(tickets, dia):
-    """Agrega los tickets de un día (str YYYY-MM-DD, hora Colombia)."""
     flujo = defaultdict(int); tipo = defaultdict(int); categoria = defaultdict(int)
     grupo = defaultdict(int); sla = defaultdict(int); temas = {k: 0 for k in TEMAS}
+    m_flujo = defaultdict(list); m_tema = defaultdict(list)
     total = escalado = sla_venc = 0
 
     for t in tickets:
@@ -106,10 +109,10 @@ def aggregate(tickets, dia):
         if created.strftime("%Y-%m-%d") != dia:
             continue
         total += 1
-        fields = cf(t)
-        tags = t.get("tags", []) or []
+        fields = cf(t); tags = t.get("tags", []) or []
 
-        flujo[flujo_de(fields, tags)] += 1
+        fl = flujo_de(fields, tags)
+        flujo[fl] += 1
         tipo[(fields.get(F_TIPO) or "sin_tipo")] += 1
         categoria[(fields.get(F_CATEGORIA) or "sin_categoria")] += 1
 
@@ -124,6 +127,10 @@ def aggregate(tickets, dia):
         if s in SLA_VENCIDO:
             sla_venc += 1
 
+        snip = snippet(t)
+        if snip and len(m_flujo[fl]) < MUESTRA_CAP:
+            m_flujo[fl].append(snip)
+
         blob = " ".join([
             t.get("subject") or "", t.get("description") or "",
             fields.get(F_SUBFLUJO) or "", " ".join(tags),
@@ -131,6 +138,8 @@ def aggregate(tickets, dia):
         for tema, pats in TEMAS.items():
             if any(p in blob for p in pats):
                 temas[tema] += 1
+                if snip and len(m_tema[tema]) < MUESTRA_CAP:
+                    m_tema[tema].append(snip)
 
     return {
         "dia": dia,
@@ -139,6 +148,7 @@ def aggregate(tickets, dia):
         "sla_vencidos": sla_venc,
         "flujo": dict(flujo), "tipo": dict(tipo), "categoria": dict(categoria),
         "grupo": dict(grupo), "sla": dict(sla), "temas": temas,
+        "muestra": {"flujo": dict(m_flujo), "tema": dict(m_tema)},
     }
 
 
@@ -151,6 +161,9 @@ def upsert(rows):
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
     r = requests.post(url, headers=headers, json=rows, timeout=60)
+    if r.status_code in (401, 403):
+        headers.pop("Authorization", None)   # llaves nuevas sb_secret_ van solo en apikey
+        r = requests.post(url, headers=headers, json=rows, timeout=60)
     r.raise_for_status()
 
 
@@ -166,13 +179,11 @@ def dias_objetivo(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", help="Día puntual YYYY-MM-DD (hora Colombia)")
-    ap.add_argument("--backfill", nargs=2, metavar=("DESDE", "HASTA"),
-                    help="Rango inclusivo YYYY-MM-DD YYYY-MM-DD")
+    ap.add_argument("--date")
+    ap.add_argument("--backfill", nargs=2, metavar=("DESDE", "HASTA"))
     args = ap.parse_args()
 
     dias = dias_objetivo(args)
-    # buffer de 1 día antes del primer día para cubrir desfases de índice/zona
     desde = dt.date.fromisoformat(min(dias)) - dt.timedelta(days=1)
     print(f"Consultando Zendesk desde {desde} para días: {', '.join(dias)}")
     tickets = zendesk_pull(dt.datetime(desde.year, desde.month, desde.day, tzinfo=BOGOTA))
@@ -181,7 +192,7 @@ def main():
     rows = [aggregate(tickets, d) for d in dias]
     for r in rows:
         print(f"  {r['dia']} ({r['dow']}): total={r['total']} escalado={r['escalado']} "
-              f"sla_vencidos={r['sla_vencidos']}")
+              f"sla_vencidos={r['sla_vencidos']} muestras_flujo={len(r['muestra']['flujo'])}")
     upsert(rows)
     print(f"UPSERT OK: {len(rows)} fila(s) en docum_ingreso_diario")
 
