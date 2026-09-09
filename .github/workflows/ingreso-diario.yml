@@ -1,8 +1,5 @@
-
 name: DOCUM · Ingreso diario
 
-# Corre todos los días a las 11:00 UTC = 06:00 Colombia, procesando el día anterior.
-# También se puede lanzar a mano desde la pestaña Actions (con fecha o rango opcional).
 on:
   schedule:
     - cron: "0 11 * * *"
