@@ -203,6 +203,7 @@ function VistaDiaria({ rows, sel, setSel, scope }) {
   const maxTotal = Math.max(...rows.map(r => r.total), 1)
   const flujoTop = Object.entries(scope.flujo).sort((a, b) => b[1] - a[1])[0]
   const paquete = buildPaquete(scope.rows, scope.label)
+  const alcance = sel === 'all' ? 'periodo:all' : `dia:${sel}`
   return (
     <>
       <div style={{ color: '#8aa0b6', fontSize: 13, marginBottom: 12 }}>{scope.label}</div>
@@ -249,7 +250,7 @@ function VistaDiaria({ rows, sel, setSel, scope }) {
       <div style={{ marginTop: 12 }}>
         <TemasDestacados scope={scope} />
       </div>
-      <PanelCopiar paquete={paquete} />
+      <PanelAnalisis paquete={paquete} alcance={alcance} />
     </>
   )
 }
@@ -427,6 +428,7 @@ function VistaAnalisis({ grupos, gran, setGran, selKey, setSelKey, scope }) {
   const volCand = buckets.reduce((a, b) => a + b.vol, 0), absCand = buckets.reduce((a, b) => a + b.absorbible, 0)
   const titulo = `${gran === 'mes' ? 'Mes' : gran === 'semana' ? 'Semana' : 'Día'} ${etiqueta(selKey)}`
   const paquete = buildPaquete(scope.rows, titulo)
+  const alcance = `${gran}:${selKey}`   // ej: 'mes:2026-09', 'semana:2026-W38', 'dia:2026-09-16'
 
   return (
     <>
@@ -489,21 +491,112 @@ function VistaAnalisis({ grupos, gran, setGran, selKey, setSelKey, scope }) {
           <Kpi label="Alivio sobre el periodo" small value={`${pct(absCand, scope.total)}%`} accent="#4ade80" foot="De la carga del periodo" />
         </div>
       </div>
-      <PanelCopiar paquete={paquete} />
+      <PanelAnalisis paquete={paquete} alcance={alcance} />
     </>
   )
 }
 
-function PanelCopiar({ paquete }) {
+/* ── Resumen narrativo: copiar datos ⇄ pegar el análisis y guardarlo ── */
+const _btnPri = { borderRadius: 8, padding: '8px 16px', fontSize: 13.5, fontWeight: 500, border: 'none', background: '#14b8a6', color: '#04241f', cursor: 'pointer', whiteSpace: 'nowrap' }
+const _btnSec = { borderRadius: 8, padding: '8px 16px', fontSize: 13.5, fontWeight: 500, border: '1px solid #334155', background: 'transparent', color: '#cbd5e1', cursor: 'pointer', whiteSpace: 'nowrap' }
+
+function PanelAnalisis({ paquete, alcance }) {
+  const [guardado, setGuardado] = useState(null)   // { texto, actualizado }
+  const [draft, setDraft] = useState('')
+  const [editando, setEditando] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+
+  useEffect(() => {
+    let vivo = true
+    setGuardado(null); setDraft(''); setEditando(false); setErr(null)
+    ;(async () => {
+      const { data, error } = await supabase.from('docum_analisis')
+        .select('texto,actualizado').eq('alcance', alcance).maybeSingle()
+      if (!vivo || error || !data) return
+      setGuardado(data); setDraft(data.texto)
+    })()
+    return () => { vivo = false }
+  }, [alcance])
+
+  async function guardar() {
+    setSaving(true); setErr(null)
+    const fila = { alcance, texto: draft.trim(), actualizado: new Date().toISOString() }
+    const { error } = await supabase.from('docum_analisis').upsert(fila, { onConflict: 'alcance' })
+    setSaving(false)
+    if (error) { setErr('No se pudo guardar: ' + error.message); return }
+    setGuardado({ texto: fila.texto, actualizado: fila.actualizado }); setEditando(false)
+  }
+
+  const hayTexto = !!guardado?.texto
   return (
     <div style={{ marginTop: 12, borderRadius: 12, padding: 20, background: 'linear-gradient(180deg,#0f1a2b,#0d1524)', border: '1px solid #1e2b3c' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: (editando || hayTexto) ? 16 : 0 }}>
         <div>
-          <div style={{ fontWeight: 600 }}>Resumen narrativo</div>
-          <div style={{ fontSize: 12, color: '#8aa0b6' }}>Copia los datos + ejemplos + detalle por flujo de este periodo y pégalos en el chat para obtener el análisis</div>
+          <div style={{ fontWeight: 600 }}>Resumen narrativo (IA)</div>
+          <div style={{ fontSize: 12, color: '#8aa0b6' }}>
+            {hayTexto
+              ? `Guardado · ${new Date(guardado.actualizado).toLocaleString('es-CO')}`
+              : 'Copia los datos, pégalos en el chat, y trae de vuelta el análisis aquí'}
+          </div>
         </div>
-        <BotonCopiar texto={paquete} />
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <BotonCopiar texto={paquete} />
+          {!editando && (
+            <button onClick={() => { setDraft(guardado?.texto || ''); setEditando(true) }} style={_btnSec}>
+              {hayTexto ? 'Editar análisis' : 'Pegar análisis'}
+            </button>
+          )}
+        </div>
       </div>
+
+      {editando && (
+        <div>
+          <textarea value={draft} onChange={e => setDraft(e.target.value)}
+            placeholder="Pega aquí el análisis que te devolvió el chat…"
+            style={{ width: '100%', minHeight: 180, boxSizing: 'border-box', resize: 'vertical', background: '#0b1420', color: '#e6edf3', border: '1px solid #1e2b3c', borderRadius: 10, padding: 12, fontSize: 13.5, lineHeight: 1.5, fontFamily: 'inherit' }} />
+          {err && <div style={{ color: '#f87171', fontSize: 12.5, marginTop: 8 }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button onClick={guardar} disabled={saving || !draft.trim()} style={{ ..._btnPri, opacity: (saving || !draft.trim()) ? 0.5 : 1, cursor: (saving || !draft.trim()) ? 'default' : 'pointer' }}>
+              {saving ? 'Guardando…' : 'Guardar en el módulo'}
+            </button>
+            <button onClick={() => { setEditando(false); setDraft(guardado?.texto || ''); setErr(null) }} style={_btnSec}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {!editando && hayTexto && (
+        <div style={{ background: '#0b1420', border: '1px solid #1e2b3c', borderRadius: 10, padding: 16 }}>
+          <Narrativa texto={guardado.texto} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* Render ligero del texto: párrafos, viñetas y **negrita** */
+function Narrativa({ texto }) {
+  const inline = s => s.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
+    p.startsWith('**') && p.endsWith('**')
+      ? <strong key={i} style={{ color: '#e6edf3' }}>{p.slice(2, -2)}</strong>
+      : <React.Fragment key={i}>{p}</React.Fragment>)
+  const bloques = texto.trim().split(/\n{2,}/)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13.5, lineHeight: 1.55, color: '#c7d2e0' }}>
+      {bloques.map((b, i) => {
+        const lineas = b.split('\n')
+        const esLista = lineas.length > 0 && lineas.every(l => /^\s*[-•*]\s+/.test(l))
+        if (esLista) return (
+          <ul key={i} style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {lineas.map((l, j) => <li key={j}>{inline(l.replace(/^\s*[-•*]\s+/, ''))}</li>)}
+          </ul>
+        )
+        return (
+          <p key={i} style={{ margin: 0 }}>
+            {lineas.map((l, j) => <React.Fragment key={j}>{inline(l)}{j < lineas.length - 1 && <br />}</React.Fragment>)}
+          </p>
+        )
+      })}
     </div>
   )
 }
