@@ -195,6 +195,8 @@ def upsert(rows):
     if r.status_code in (401, 403):
         headers.pop("Authorization", None)   # llaves nuevas sb_secret_ van solo en apikey
         r = requests.post(url, headers=headers, json=rows, timeout=60)
+    if not r.ok:
+        print("SUPABASE ERROR:", r.status_code, r.text)   # mensaje real de PostgREST
     r.raise_for_status()
 
 
