@@ -3,10 +3,13 @@ import { supabase } from './supabaseClient.js'
 
 /* ── Módulo Ingreso DOCUM (sin IA externa) ────────────────────
    • Vista diaria: día a día (KPIs, tendencia, desgloses, temas).
+     "Por flujo" es desplegable: clic en un flujo → qué llega dentro de él
+     (sub-flujos, punto de entrada, tipo, temas y ejemplos de casos).
+     "Temas destacados" también se despliega: ejemplos + en qué flujo aparece.
    • Análisis: gerencial por Día/Semana/Mes (casuísticas, subcasuísticas,
      candidatas a IA — todo calculado desde los datos).
    El botón "Copiar datos para análisis" arma un paquete (cifras + ejemplos
-   de casos) para pegarlo en el chat y obtener el resumen narrativo.        */
+   + detalle por flujo) para pegarlo en el chat y obtener el resumen narrativo. */
 
 const FLUJO_COLOR = {
   pqrd: '#2dd4bf', correspondencia: '#60a5fa', medicina_laboral: '#f472b6',
@@ -43,6 +46,27 @@ function isoWeek(dstr) {
   return `${d.getUTCFullYear()}-W${String(w).padStart(2, '0')}`
 }
 
+/* Fusiona los detalle_flujo de varias filas (para "Todo el periodo") */
+function mergeDetalle(rows) {
+  const out = {}
+  rows.forEach(r => {
+    Object.entries(r.detalle_flujo || {}).forEach(([fl, dims]) => {
+      const d = (out[fl] ||= { subflujo: {}, categoria: {}, tipo: {}, temas: {} })
+      mergeInto(d.subflujo, dims.subflujo); mergeInto(d.categoria, dims.categoria)
+      mergeInto(d.tipo, dims.tipo); mergeInto(d.temas, dims.temas)
+    })
+  })
+  return out
+}
+function mergeMuestra(rows) {
+  const flujo = {}, tema = {}
+  rows.forEach(r => {
+    Object.entries(r.muestra?.flujo || {}).forEach(([k, a]) => { (flujo[k] ||= []).push(...a) })
+    Object.entries(r.muestra?.tema || {}).forEach(([k, a]) => { (tema[k] ||= []).push(...a) })
+  })
+  return { flujo, tema }
+}
+
 /* Arma el texto que se copia para pedir el análisis en el chat */
 function buildPaquete(rows, titulo) {
   const acc = { total: 0, escalado: 0, sla_vencidos: 0, flujo: {}, tipo: {}, categoria: {}, temas: {}, subflujo: {} }
@@ -55,6 +79,7 @@ function buildPaquete(rows, titulo) {
     Object.entries(mf).forEach(([k, a]) => { (mFlujo[k] ||= []).push(...a) })
     Object.entries(mt).forEach(([k, a]) => { (mTema[k] ||= []).push(...a) })
   })
+  const det = mergeDetalle(rows)
   const topOf = (o, n = 12) => Object.entries(o).filter(([k]) => !k.startsWith('sin_')).sort((a, b) => b[1] - a[1]).slice(0, n)
   const L = []
   L.push(`ANÁLISIS DOCUM — ${titulo}`)
@@ -64,6 +89,13 @@ function buildPaquete(rows, titulo) {
   L.push('TIPO: ' + topOf(acc.tipo).map(([k, v]) => `${k}=${v}`).join(', '))
   L.push('TEMAS: ' + Object.entries(acc.temas).filter(([, v]) => v > 0).map(([k, v]) => `${k}=${v}`).join(', '))
   L.push('SUB-FLUJOS (top): ' + topOf(acc.subflujo).map(([k, v]) => `${k}=${v}`).join(', '))
+  L.push('')
+  L.push('DETALLE POR FLUJO (qué más llega dentro de cada uno):')
+  topOf(acc.flujo, 6).forEach(([fl]) => {
+    const d = det[fl]; if (!d) return
+    const subs = Object.entries(d.subflujo).filter(([k]) => !k.startsWith('sin_')).sort((a, b) => b[1] - a[1]).slice(0, 5)
+    L.push(`- ${FLUJO_LABEL[fl] || fl}: ${subs.map(([k, v]) => `${k}=${v}`).join(', ') || '(sin sub-flujo tipificado)'}`)
+  })
   L.push('')
   L.push('EJEMPLOS DE CASOS POR TEMA:')
   Object.entries(mTema).forEach(([k, a]) => { if (a.length) L.push(`- ${k}: ${a.slice(0, 5).join(' || ')}`) })
@@ -133,7 +165,11 @@ export default function IngresoDiario() {
       const sla_vencidos = rows.reduce((a, r) => a + (r.sla_vencidos || 0), 0)
       const f = {}, t = {}, c = {}, tm = {}
       rows.forEach(r => { mergeInto(f, r.flujo); mergeInto(t, r.tipo); mergeInto(c, r.categoria); mergeInto(tm, r.temas) })
-      return { label: `Periodo · ${rows.length} días con registro`, total, escalado, sla_vencidos, flujo: f, tipo: t, categoria: c, temas: tm, rows }
+      return {
+        label: `Periodo · ${rows.length} días con registro`, total, escalado, sla_vencidos,
+        flujo: f, tipo: t, categoria: c, temas: tm,
+        detalle_flujo: mergeDetalle(rows), muestra: mergeMuestra(rows), rows,
+      }
     }
     const r = rows.find(x => x.dia === sel)
     return { label: `${r.dow} ${prettyDia(r.dia)}`, ...r, rows: [r] }
@@ -203,23 +239,178 @@ function VistaDiaria({ rows, sel, setSel, scope }) {
         </div>
         <Legend items={[['#22d3ee', 'No escalado'], ['#f59e0b', 'Escalado N3']]} />
       </Panel>
+      <div style={{ marginTop: 12 }}>
+        <PorFlujoInteractivo scope={scope} />
+      </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0,1fr))', gap: 12, marginTop: 12 }}>
-        <Panel title="Por flujo" subtitle="Distribución del ingreso"><BarList data={scope.flujo} total={scope.total} labelMap={FLUJO_LABEL} colorMap={FLUJO_COLOR} /></Panel>
         <Panel title="Por tipo de caso" subtitle="Incidente vs. requerimiento"><BarList data={scope.tipo} total={scope.total} labelMap={TIPO_LABEL} colorMap={TIPO_COLOR} /></Panel>
         <Panel title="Por categoría" subtitle="Top de puntos de entrada"><BarList data={scope.categoria} total={scope.total} limit={6} defaultColor="#38bdf8" /></Panel>
-        <Panel title="Temas destacados" subtitle="Detección por sub-flujo y texto">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 2 }}>
-            {Object.entries(scope.temas || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
-              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14 }}>
-                <span style={{ color: v ? '#cbd5e1' : '#64748b' }}>{TEMA_LABEL[k] || k}</span>
-                <span style={{ fontWeight: 600, color: v ? '#5eead4' : '#475569' }}>{v}</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <TemasDestacados scope={scope} />
       </div>
       <PanelCopiar paquete={paquete} />
     </>
+  )
+}
+
+/* ── Drill-down "Por flujo": clic → qué llega dentro del flujo ── */
+function PorFlujoInteractivo({ scope }) {
+  const [activo, setActivo] = useState(null)
+  const entries = Object.entries(scope.flujo || {}).sort((a, b) => b[1] - a[1])
+  const max = Math.max(...entries.map(([, v]) => v), 1)
+  const det = scope.detalle_flujo || {}
+  const muestras = scope.muestra?.flujo || {}
+  return (
+    <Panel title="Por flujo" subtitle="Distribución del ingreso · clic en un flujo para ver qué llega dentro de él">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {entries.map(([k, v]) => {
+          const abierto = activo === k
+          return (
+            <div key={k}>
+              <div onClick={() => setActivo(a => a === k ? null : k)} style={{ cursor: 'pointer', userSelect: 'none' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, marginBottom: 4 }}>
+                  <span style={{ color: abierto ? '#5eead4' : '#cbd5e1' }}>
+                    <span style={{ display: 'inline-block', width: 14, color: '#5eead4' }}>{abierto ? '▾' : '▸'}</span>
+                    {FLUJO_LABEL[k] || k}
+                  </span>
+                  <span style={{ color: '#8aa0b6' }}>{v} · {pct(v, scope.total)}%</span>
+                </div>
+                <div style={{ height: 6, borderRadius: 3, background: '#16223a' }}>
+                  <div style={{ width: `${(v / max) * 100}%`, height: '100%', borderRadius: 3, background: FLUJO_COLOR[k] || '#38bdf8' }} />
+                </div>
+              </div>
+              {abierto && <DetalleFlujo dims={det[k]} muestras={muestras[k]} total={v} />}
+            </div>
+          )
+        })}
+      </div>
+    </Panel>
+  )
+}
+
+function DetalleFlujo({ dims, muestras, total }) {
+  const wrap = { marginTop: 10, marginBottom: 4, padding: 14, background: '#0b1420', border: '1px solid #1e2b3c', borderRadius: 10 }
+  if (!dims) return <div style={{ ...wrap, fontSize: 12.5, color: '#64748b' }}>Este día aún no tiene el detalle por flujo. Vuelve a correr el sync (v4) para poblarlo.</div>
+  const top = (o, n = 6) => Object.entries(o || {}).filter(([k]) => !k.startsWith('sin_')).sort((a, b) => b[1] - a[1]).slice(0, n)
+  const temas = Object.entries(dims.temas || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])
+  return (
+    <div style={wrap}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 18 }}>
+        <MiniDist titulo="Qué más llega" data={top(dims.subflujo)} total={total} color="#22d3ee" pretty={prettySub} />
+        <MiniDist titulo="Punto de entrada" data={top(dims.categoria, 5)} total={total} color="#38bdf8" />
+        <MiniDist titulo="Tipo de caso" data={top(dims.tipo)} total={total} color="#818cf8" labelMap={TIPO_LABEL} />
+      </div>
+      {temas.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <Rotulo>Temas detectados</Rotulo>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {temas.map(([k, v]) => (
+              <span key={k} style={{ fontSize: 12.5, padding: '3px 10px', borderRadius: 999, background: '#12283a', border: '1px solid #1e3a4a', color: '#5eead4' }}>{TEMA_LABEL[k] || k} · {v}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {muestras?.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <Rotulo>Ejemplos de casos</Rotulo>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {muestras.slice(0, 5).map((s, i) => (
+              <div key={i} style={{ fontSize: 12.5, color: '#a8b3d9', paddingLeft: 10, borderLeft: '2px solid #1e3a4a', lineHeight: 1.4 }}>{s}</div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MiniDist({ titulo, data, total, color = '#38bdf8', labelMap, pretty }) {
+  const max = Math.max(...data.map(([, v]) => v), 1)
+  const fmt = k => (labelMap && labelMap[k]) || (pretty ? pretty(k) : k.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()))
+  return (
+    <div>
+      <Rotulo>{titulo}</Rotulo>
+      {data.length === 0
+        ? <div style={{ fontSize: 12.5, color: '#475569' }}>Sin datos tipificados</div>
+        : <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+          {data.map(([k, v]) => (
+            <div key={k}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3, gap: 8 }}>
+                <span style={{ color: '#cbd5e1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(k)}</span>
+                <span style={{ color: '#8aa0b6', whiteSpace: 'nowrap' }}>{v} · {pct(v, total)}%</span>
+              </div>
+              <div style={{ height: 5, borderRadius: 3, background: '#16223a' }}><div style={{ width: `${(v / max) * 100}%`, height: '100%', borderRadius: 3, background: color }} /></div>
+            </div>
+          ))}
+        </div>}
+    </div>
+  )
+}
+
+/* ── Temas destacados desplegables ── */
+function TemasDestacados({ scope }) {
+  const [activo, setActivo] = useState(null)
+  const temas = Object.entries(scope.temas || {}).sort((a, b) => b[1] - a[1])
+  const muestras = scope.muestra?.tema || {}
+  const det = scope.detalle_flujo || {}
+  const totalTemas = temas.reduce((a, [, v]) => a + v, 0)
+  const flujosDe = tema => Object.entries(det)
+    .map(([fl, d]) => [fl, d.temas?.[tema] || 0])
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1])
+  return (
+    <Panel title="Temas destacados" subtitle="Detección por sub-flujo y texto · clic para ver ejemplos y en qué flujo aparecen">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 2 }}>
+        {temas.map(([k, v]) => {
+          const abierto = activo === k
+          const clickable = v > 0
+          const flujos = clickable ? flujosDe(k) : []
+          return (
+            <div key={k}>
+              <div onClick={() => clickable && setActivo(a => a === k ? null : k)}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 14, padding: '5px 0', cursor: clickable ? 'pointer' : 'default' }}>
+                <span style={{ color: v ? '#cbd5e1' : '#64748b' }}>
+                  <span style={{ display: 'inline-block', width: 14, color: '#5eead4' }}>{clickable ? (abierto ? '▾' : '▸') : ''}</span>
+                  {TEMA_LABEL[k] || k}
+                </span>
+                <span style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                  <span style={{ fontSize: 11.5, color: '#64748b' }}>{v ? `${pct(v, totalTemas)}%` : ''}</span>
+                  <span style={{ fontWeight: 600, color: v ? '#5eead4' : '#475569' }}>{v}</span>
+                </span>
+              </div>
+              {abierto && (
+                <div style={{ margin: '2px 0 8px', padding: 12, background: '#0b1420', border: '1px solid #1e2b3c', borderRadius: 10 }}>
+                  {flujos.length > 0 && (
+                    <div style={{ marginBottom: muestras[k]?.length ? 12 : 0 }}>
+                      <Rotulo>Aparece en</Rotulo>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {flujos.map(([fl, n]) => (
+                          <span key={fl} style={{ fontSize: 12.5, padding: '3px 10px', borderRadius: 999, background: '#12283a', border: '1px solid #1e3a4a', color: '#a8b3d9' }}>{FLUJO_LABEL[fl] || fl} · {n}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {muestras[k]?.length > 0 && (
+                    <div>
+                      <Rotulo>Ejemplos</Rotulo>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {muestras[k].slice(0, 5).map((s, i) => (
+                          <div key={i} style={{ fontSize: 12.5, color: '#a8b3d9', paddingLeft: 10, borderLeft: '2px solid #1e3a4a', lineHeight: 1.4 }}>{s}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {flujos.length === 0 && !muestras[k]?.length && (
+                    <div style={{ fontSize: 12.5, color: '#64748b' }}>Sin ejemplos guardados para este tema en el periodo.</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </Panel>
   )
 }
 
@@ -309,7 +500,7 @@ function PanelCopiar({ paquete }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <div style={{ fontWeight: 600 }}>Resumen narrativo</div>
-          <div style={{ fontSize: 12, color: '#8aa0b6' }}>Copia los datos + ejemplos de este periodo y pégalos en el chat para obtener el análisis</div>
+          <div style={{ fontSize: 12, color: '#8aa0b6' }}>Copia los datos + ejemplos + detalle por flujo de este periodo y pégalos en el chat para obtener el análisis</div>
         </div>
         <BotonCopiar texto={paquete} />
       </div>
@@ -319,6 +510,7 @@ function PanelCopiar({ paquete }) {
 
 /* ── Subcomponentes ── */
 function Msg({ children, tone = '#8aa0b6' }) { return <div style={{ padding: '40px 8px', color: tone, fontSize: 14 }}>{children}</div> }
+function Rotulo({ children }) { return <div style={{ fontSize: 11.5, color: '#8aa0b6', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 8 }}>{children}</div> }
 function Pill({ active, onClick, children }) {
   return <button onClick={onClick} style={{ borderRadius: 8, padding: '6px 12px', fontSize: 13.5, fontWeight: 500, cursor: 'pointer', background: active ? '#5eead4' : '#111c2e', color: active ? '#04241f' : '#cbd5e1', border: `1px solid ${active ? '#5eead4' : '#1e2b3c'}` }}>{children}</button>
 }
