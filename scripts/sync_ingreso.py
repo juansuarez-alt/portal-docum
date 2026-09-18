@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Portal DOCUM · Sincronización de Ingreso Diario  (v3)
+Portal DOCUM · Sincronización de Ingreso Diario  (v4)
 ──────────────────────────────────────────────────────
-Igual que la v2, pero además guarda el conteo de SUB-FLUJOS (subcasuísticas).
-También guarda una MUESTRA de asuntos/descripciones
-representativos por flujo y por tema, para que el análisis por IA pueda
-explicar causas y proponer soluciones (no solo repetir conteos).
+Igual que la v3, pero además guarda DETALLE_FLUJO: un cruce anidado que,
+por cada flujo, cuenta sus sub-flujos, categorías, tipos de caso y temas.
+Eso permite el "drill-down" en el portal (clic en PQRD → qué llega dentro de él)
+y le da a la IA el contexto por flujo, no solo agregados globales.
+
+También conserva la MUESTRA de asuntos/descripciones por flujo y por tema.
 
 Uso:
   python sync_ingreso.py
@@ -99,11 +101,21 @@ def snippet(t):
     return " ".join(txt.split())[:MUESTRA_LEN]
 
 
+def _nuevo_detalle():
+    return {
+        "subflujo": defaultdict(int),
+        "categoria": defaultdict(int),
+        "tipo": defaultdict(int),
+        "temas": defaultdict(int),
+    }
+
+
 def aggregate(tickets, dia):
     flujo = defaultdict(int); tipo = defaultdict(int); categoria = defaultdict(int)
     grupo = defaultdict(int); sla = defaultdict(int); temas = {k: 0 for k in TEMAS}
     m_flujo = defaultdict(list); m_tema = defaultdict(list)
     subflujo = defaultdict(int)
+    det = defaultdict(_nuevo_detalle)          # cruce anidado por flujo
     total = escalado = sla_venc = 0
 
     for t in tickets:
@@ -114,10 +126,21 @@ def aggregate(tickets, dia):
         fields = cf(t); tags = t.get("tags", []) or []
 
         fl = flujo_de(fields, tags)
+        sf = fields.get(F_SUBFLUJO) or "sin_subflujo"
+        ca = fields.get(F_CATEGORIA) or "sin_categoria"
+        ti = fields.get(F_TIPO) or "sin_tipo"
+
+        # ── agregados globales (tarjetas superiores) ──
         flujo[fl] += 1
-        tipo[(fields.get(F_TIPO) or "sin_tipo")] += 1
-        categoria[(fields.get(F_CATEGORIA) or "sin_categoria")] += 1
-        subflujo[(fields.get(F_SUBFLUJO) or "sin_subflujo")] += 1
+        tipo[ti] += 1
+        categoria[ca] += 1
+        subflujo[sf] += 1
+
+        # ── detalle por flujo (drill-down) ──
+        d = det[fl]
+        d["subflujo"][sf] += 1
+        d["categoria"][ca] += 1
+        d["tipo"][ti] += 1
 
         g_raw = (fields.get(F_TRASPASO) or "").strip()
         g = g_raw.split(" | ")[0].strip() if g_raw else "(sin dato)"
@@ -138,11 +161,14 @@ def aggregate(tickets, dia):
             t.get("subject") or "", t.get("description") or "",
             fields.get(F_SUBFLUJO) or "", " ".join(tags),
         ]).lower()
-        for tema, pats in TEMAS.items():
-            if any(p in blob for p in pats):
-                temas[tema] += 1
-                if snip and len(m_tema[tema]) < MUESTRA_CAP:
-                    m_tema[tema].append(snip)
+        matched = [tema for tema, pats in TEMAS.items() if any(p in blob for p in pats)]
+        for tema in matched:
+            temas[tema] += 1
+            d["temas"][tema] += 1
+            if snip and len(m_tema[tema]) < MUESTRA_CAP:
+                m_tema[tema].append(snip)
+
+    detalle_flujo = {fl: {k: dict(v) for k, v in dims.items()} for fl, dims in det.items()}
 
     return {
         "dia": dia,
@@ -152,6 +178,7 @@ def aggregate(tickets, dia):
         "flujo": dict(flujo), "tipo": dict(tipo), "categoria": dict(categoria),
         "subflujo": dict(subflujo),
         "grupo": dict(grupo), "sla": dict(sla), "temas": temas,
+        "detalle_flujo": detalle_flujo,
         "muestra": {"flujo": dict(m_flujo), "tema": dict(m_tema)},
     }
 
@@ -196,7 +223,7 @@ def main():
     rows = [aggregate(tickets, d) for d in dias]
     for r in rows:
         print(f"  {r['dia']} ({r['dow']}): total={r['total']} escalado={r['escalado']} "
-              f"sla_vencidos={r['sla_vencidos']} muestras_flujo={len(r['muestra']['flujo'])}")
+              f"sla_vencidos={r['sla_vencidos']} flujos_detalle={len(r['detalle_flujo'])}")
     upsert(rows)
     print(f"UPSERT OK: {len(rows)} fila(s) en docum_ingreso_diario")
 
