@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, Fragment } from 'react'
 import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
 import IngresoDiario from './IngresoDiario.jsx'
+import * as XLSX from 'xlsx'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
 /* ---------- constantes ---------- */
@@ -660,6 +661,7 @@ function DetalleProd({ isAdmin, equipo }) {
   const [pastePeriodo, setPastePeriodo] = useState('')
   const [msg, setMsg] = useState(null)
   const [filtro, setFiltro] = useState(null)
+  const [importing, setImporting] = useState(false)
 
   const load = useCallback(async () => {
     const { data } = await supabase.from('productividad').select('*').eq('equipo', equipo).order('analyst_name')
@@ -743,6 +745,51 @@ function DetalleProd({ isAdmin, equipo }) {
       <div className="muted sm">{sub}</div>
     </div>
   )
+    async function importarExcel(file) {
+    setImporting(true); setMsg(null)
+    try {
+      const buf = await file.arrayBuffer()
+      const wb = XLSX.read(new Uint8Array(buf), { type: 'array' })
+      const sName = wb.SheetNames.find(n => /asesor/i.test(n)) || wb.SheetNames[0]
+      const rowsX = XLSX.utils.sheet_to_json(wb.Sheets[sName], { header: 1, defval: '' })
+      const header = rowsX[0] || []
+      const dayCols = []; header.forEach((h, j) => { if (/^\d{2}\b/.test(String(h))) dayCols.push([j, parseInt(String(h), 10)]) })
+      // periodo desde la hoja de detalle (fecha real)
+      let mes = ''
+      const dName = wb.SheetNames.find(n => /detalle/i.test(n))
+      if (dName) { const c = wb.Sheets[dName]['C2']; if (c && /^\d{4}-\d{2}/.test(String(c.v))) { const [y, m] = String(c.v).split('-'); mes = MES[+m] + ' ' + y } }
+      const a = dayCols[0]?.[1], b = dayCols[dayCols.length - 1]?.[1]
+      const periodo = (mes || 'Corte') + (a ? ` · ${String(a).padStart(2, '0')}-${String(b).padStart(2, '0')}` : '')
+      // catálogo: marca + meta por analista
+      const { data: cat } = await supabase.from('productividad_analistas').select('analista,marca,meta').eq('activo', true)
+      const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+      const idx = {}; (cat || []).forEach(c => { idx[norm(c.analista)] = c })
+      const lookup = nm => {
+        const k = norm(nm); if (idx[k]) return idx[k]
+        const wn = new Set(k.split(' ').filter(w => w.length > 2))
+        for (const key in idx) { let n = 0; key.split(' ').forEach(w => { if (w.length > 2 && wn.has(w)) n++ }); if (n >= 2) return idx[key] }
+        return null
+      }
+      const BOTS = new Set(['ai agent', 'zendesk', 'automation'])
+      const parsed = []
+      for (let i = 1; i < rowsX.length; i++) {
+        const nombre = String(rowsX[i][0] || '').trim(); if (!nombre || BOTS.has(norm(nombre))) continue
+        const c = lookup(nombre); const marca = c ? c.marca : 'Sin marca'
+        if (marca !== equipo) continue                 // solo el equipo seleccionado
+        const dias = {}
+        dayCols.forEach(([j, d]) => { const v = rowsX[i][j]; if (typeof v === 'number' && v > 0) dias[d] = v })
+        if (Object.keys(dias).length === 0) continue
+        parsed.push({ equipo, periodo, analyst_name: nombre, meta: c ? c.meta : 20, dias })
+      }
+      if (!parsed.length) { setMsg({ t: 'err', m: `No encontré analistas de ${equipo} en el archivo. Revisa que su marca en productividad_analistas sea exactamente "${equipo}".` }); setImporting(false); return }
+      await supabase.from('productividad').delete().eq('equipo', equipo).eq('periodo', periodo)
+      const { error } = await supabase.from('productividad').insert(parsed)
+      setImporting(false)
+      if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+      setMsg({ t: 'ok', m: `${parsed.length} analistas de ${equipo} cargados en ${periodo}.` })
+      setPeriodo(periodo); load()
+    } catch (err) { setImporting(false); setMsg({ t: 'err', m: 'No pude leer el Excel: ' + err.message }) }
+  }
 
   return (
     <>
@@ -758,6 +805,13 @@ function DetalleProd({ isAdmin, equipo }) {
             </button>}
           </div>
         </div>
+        {isAdmin && <>
+  <button className="btn primary" onClick={() => document.getElementById('prod-xlsx').click()} disabled={importing}>
+    {importing ? 'Cargando…' : 'Cargar Excel de Zendesk'}
+  </button>
+  <input id="prod-xlsx" type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
+    onChange={e => { const f = e.target.files[0]; if (f) importarExcel(f); e.target.value = '' }} />
+</>}
         {isAdmin && showPaste && (
           <div className="panel" style={{ marginTop: 0 }}>
             <label className="f">Período<input placeholder="Ej: Agosto 2026" value={pastePeriodo} onChange={e => setPastePeriodo(e.target.value)} /></label>
