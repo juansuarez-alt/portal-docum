@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, Fragment } from 'react'
+import * as XLSX from 'xlsx'
 import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
 import IngresoDiario from './IngresoDiario.jsx'
-import * as XLSX from 'xlsx'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
 /* ---------- constantes ---------- */
@@ -562,7 +562,7 @@ function Analistas() {
     const { data } = await supabase.from('analysts').select('*').order('name')
     setAnalysts(data || [])
   }, [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, [])
 
   const add = async () => {
     setMsg(null)
@@ -738,14 +738,8 @@ function DetalleProd({ isAdmin, equipo }) {
     setPasteText(''); setShowPaste(false); setPeriodo(per); load()
   }
 
-  const kpi = (lab, val, sub, color) => (
-    <div className="card" style={{ margin: 0, borderTop: '4px solid ' + color, padding: '14px 16px' }}>
-      <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.3px' }}>{lab}</div>
-      <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--ink)', margin: '2px 0' }}>{val}</div>
-      <div className="muted sm">{sub}</div>
-    </div>
-  )
-    async function importarExcel(file) {
+  // ---- Carga directa del Excel exportado de Zendesk (hoja "Tickets únicos por asesor") ----
+  async function importarExcel(file) {
     setImporting(true); setMsg(null)
     try {
       const buf = await file.arrayBuffer()
@@ -759,7 +753,7 @@ function DetalleProd({ isAdmin, equipo }) {
       const dName = wb.SheetNames.find(n => /detalle/i.test(n))
       if (dName) { const c = wb.Sheets[dName]['C2']; if (c && /^\d{4}-\d{2}/.test(String(c.v))) { const [y, m] = String(c.v).split('-'); mes = MES[+m] + ' ' + y } }
       const a = dayCols[0]?.[1], b = dayCols[dayCols.length - 1]?.[1]
-      const periodo = (mes || 'Corte') + (a ? ` · ${String(a).padStart(2, '0')}-${String(b).padStart(2, '0')}` : '')
+      const periodoX = (mes || 'Corte') + (a ? ` · ${String(a).padStart(2, '0')}-${String(b).padStart(2, '0')}` : '')
       // catálogo: marca + meta por analista
       const { data: cat } = await supabase.from('productividad_analistas').select('analista,marca,meta').eq('activo', true)
       const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
@@ -779,39 +773,47 @@ function DetalleProd({ isAdmin, equipo }) {
         const dias = {}
         dayCols.forEach(([j, d]) => { const v = rowsX[i][j]; if (typeof v === 'number' && v > 0) dias[d] = v })
         if (Object.keys(dias).length === 0) continue
-        parsed.push({ equipo, periodo, analyst_name: nombre, meta: c ? c.meta : 20, dias })
+        parsed.push({ equipo, periodo: periodoX, analyst_name: nombre, meta: c ? c.meta : 20, dias })
       }
       if (!parsed.length) { setMsg({ t: 'err', m: `No encontré analistas de ${equipo} en el archivo. Revisa que su marca en productividad_analistas sea exactamente "${equipo}".` }); setImporting(false); return }
-      await supabase.from('productividad').delete().eq('equipo', equipo).eq('periodo', periodo)
+      await supabase.from('productividad').delete().eq('equipo', equipo).eq('periodo', periodoX)
       const { error } = await supabase.from('productividad').insert(parsed)
       setImporting(false)
       if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
-      setMsg({ t: 'ok', m: `${parsed.length} analistas de ${equipo} cargados en ${periodo}.` })
-      setPeriodo(periodo); load()
+      setMsg({ t: 'ok', m: `${parsed.length} analistas de ${equipo} cargados en ${periodoX}.` })
+      setPeriodo(periodoX); load()
     } catch (err) { setImporting(false); setMsg({ t: 'err', m: 'No pude leer el Excel: ' + err.message }) }
   }
+
+  const kpi = (lab, val, sub, color) => (
+    <div className="card" style={{ margin: 0, borderTop: '4px solid ' + color, padding: '14px 16px' }}>
+      <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.3px' }}>{lab}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--ink)', margin: '2px 0' }}>{val}</div>
+      <div className="muted sm">{sub}</div>
+    </div>
+  )
 
   return (
     <>
       <div className="card">
         <div className="cardh">
-          <div><b>Productividad DOCUM</b><div className="muted sm">Carga el formato por días. Descanso ("D") o vacío = día no trabajado.</div></div>
+          <div><b>Productividad DOCUM</b><div className="muted sm">Carga el Excel de Zendesk o pega el formato por días. Descanso ("D") o vacío = día no trabajado.</div></div>
           <div className="row">
             {periodos.length > 0 && <select value={periodo} onChange={e => { setPeriodo(e.target.value); setFiltro(null) }}>
               {periodos.map(p => <option key={p} value={p}>{p}</option>)}
             </select>}
-            {isAdmin && <button className="btn primary" onClick={() => { setShowPaste(v => !v); setPastePeriodo(periodo || '') }}>
-              {showPaste ? 'Cerrar' : 'Cargar / actualizar datos'}
+            {isAdmin && <>
+              <button className="btn primary" onClick={() => document.getElementById('prod-xlsx').click()} disabled={importing}>
+                {importing ? 'Cargando…' : 'Cargar Excel de Zendesk'}
+              </button>
+              <input id="prod-xlsx" type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
+                onChange={e => { const f = e.target.files[0]; if (f) importarExcel(f); e.target.value = '' }} />
+            </>}
+            {isAdmin && <button className="btn ghost" onClick={() => { setShowPaste(v => !v); setPastePeriodo(periodo || '') }}>
+              {showPaste ? 'Cerrar' : 'Pegar datos'}
             </button>}
           </div>
         </div>
-        {isAdmin && <>
-  <button className="btn primary" onClick={() => document.getElementById('prod-xlsx').click()} disabled={importing}>
-    {importing ? 'Cargando…' : 'Cargar Excel de Zendesk'}
-  </button>
-  <input id="prod-xlsx" type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
-    onChange={e => { const f = e.target.files[0]; if (f) importarExcel(f); e.target.value = '' }} />
-</>}
         {isAdmin && showPaste && (
           <div className="panel" style={{ marginTop: 0 }}>
             <label className="f">Período<input placeholder="Ej: Agosto 2026" value={pastePeriodo} onChange={e => setPastePeriodo(e.target.value)} /></label>
