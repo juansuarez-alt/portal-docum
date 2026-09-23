@@ -1,0 +1,1329 @@
+import { useEffect, useState, useCallback, Fragment } from 'react'
+import * as XLSX from 'xlsx'
+import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
+import IngresoMarca from './IngresoMarca.jsx'
+const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
+
+/* ---------- constantes ---------- */
+const GRACE = 10
+const TARGET = 42
+const SHIFTS = {
+  t_74:  { label: '7 a 4 · 07:00-16:00',  in: '07:00', out: '16:00', lunch: '12:00', ht: 8 },
+  t_85:  { label: '8 a 5 · 08:00-17:00',  in: '08:00', out: '17:00', lunch: '12:00', ht: 8 },
+  t_sab: { label: 'Sábado · 08:00-17:00', in: '08:00', out: '17:00', lunch: '12:00', ht: 8 },
+}
+const DIAS = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado']
+const MES = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
+const FESTIVOS_2026 = ['2026-01-01','2026-01-12','2026-03-23','2026-04-02','2026-04-03','2026-05-01','2026-05-18','2026-06-08','2026-06-15','2026-06-29','2026-07-13','2026-07-20','2026-08-07','2026-08-17','2026-10-12','2026-11-02','2026-11-11','2026-12-08','2026-12-25']
+
+/* ---------- utilidades de tiempo (zona Bogotá) ---------- */
+const bogotaDateISO = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+const bogotaHM = () => {
+  const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date())
+  const h = p.find(x => x.type === 'hour').value, m = p.find(x => x.type === 'minute').value
+  return `${h}:${m}`
+}
+const toMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0) }
+const fmtHM = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+const monthLabel = m => { const [y, mo] = m.split('-'); return `${MES[+mo]} ${y}` }
+const nextMonthOf = m => { let [y, mo] = m.split('-').map(Number); mo++; if (mo > 12) { mo = 1; y++ } return `${y}-${String(mo).padStart(2, '0')}` }
+const curMonth = () => bogotaDateISO().slice(0, 7)
+function isoWeek(d) {
+  const dt = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+  const day = dt.getUTCDay() || 7; dt.setUTCDate(dt.getUTCDate() + 4 - day)
+  const ys = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1))
+  return Math.ceil((((dt - ys) / 86400000) + 1) / 7)
+}
+
+export default function App() {
+  const [session, setSession] = useState(null)
+  const [ready, setReady] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [blocked, setBlocked] = useState(false)
+  const [tab, setTab] = useState('malla')
+  const [loginEmail, setLoginEmail] = useState('')
+  const [sent, setSent] = useState(false)
+  const [authErr, setAuthErr] = useState('')
+  const [verComoAnalista, setVerComoAnalista] = useState(false)
+  const [misEquipos, setMisEquipos] = useState([])
+  const [allTeams, setAllTeams] = useState([])
+  const [equipo, setEquipo] = useState('')
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true) })
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    return () => sub.subscription.unsubscribe()
+  }, [])
+
+  const email = session?.user?.email?.toLowerCase() || ''
+  const name = session?.user?.user_metadata?.full_name || email
+
+  useEffect(() => {
+    if (!session) { setIsAdmin(false); setBlocked(false); return }
+    if (!dominioOk(email)) { setBlocked(true); return }
+    setBlocked(false)
+    ;(async () => {
+      const { data: adm } = await supabase.from('admins').select('email').eq('email', email).maybeSingle()
+      const { data: me } = await supabase.from('analysts').select('equipos,rol').eq('email', email).maybeSingle()
+      const esAdmin = !!adm || (me?.rol === 'admin')
+      setIsAdmin(esAdmin)
+      const { data: all } = await supabase.from('analysts').select('equipos')
+      const set = new Set()
+      ;(all || []).forEach(a => String(a.equipos || '').split(',').map(x => x.trim()).filter(Boolean).forEach(t => set.add(t)))
+      if (set.size === 0) set.add('DOCUM')
+      const teams = [...set].sort()
+      setAllTeams(teams)
+      const mine = esAdmin ? teams : String(me?.equipos || '').split(',').map(x => x.trim()).filter(Boolean)
+      const visibles = mine.length ? mine : (esAdmin ? teams : ['DOCUM'])
+      setMisEquipos(visibles)
+      setEquipo(prev => (prev && visibles.includes(prev)) ? prev : (visibles[0] || 'DOCUM'))
+    })()
+  }, [session, email])
+
+  const sendMagic = async () => {
+    setAuthErr('')
+    const em = loginEmail.trim().toLowerCase()
+    if (!dominioOk(em)) { setAuthErr("Usa tu correo corporativo autorizado."); return }
+    const { error } = await supabase.auth.signInWithOtp({ email: em, options: { emailRedirectTo: window.location.origin } })
+    if (error) setAuthErr(error.message); else setSent(true)
+  }
+  const logout = () => supabase.auth.signOut()
+
+  // rol con el que se PINTA el portal (permite al admin "ver como analista")
+  const actingAdmin = isAdmin && !verComoAnalista
+
+  if (!ready) return <div className="center muted">Cargando…</div>
+
+  if (!session) return (
+    <Shell><h1>Bienvenido a la Mesa de Ayuda</h1>
+      {sent
+        ? <p className="muted">Te enviamos un <b>enlace de acceso</b> a <b>{loginEmail}</b>. Abre tu correo y haz clic en el enlace para entrar. Puedes cerrar esta pestaña.</p>
+        : <>
+            <p className="muted">Ingresa tu correo corporativo. Te llegará un enlace de acceso a tu bandeja.</p>
+            <label className="f" style={{ marginTop: 10 }}>Correo corporativo
+              <input type="email" placeholder="Ingresa tu correo corporativo" value={loginEmail}
+                onChange={e => setLoginEmail(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendMagic()} />
+            </label>
+            {authErr && <div className="notice err" style={{ marginTop: 10 }}>{authErr}</div>}
+            <button className="btn primary block" onClick={sendMagic}>Enviar enlace de acceso</button>
+          </>}
+    </Shell>
+  )
+
+  if (blocked) return (
+    <Shell><h1>Acceso restringido</h1>
+      <p className="muted">Tu correo no está habilitado para ingresar. Usa tu correo corporativo autorizado. Iniciaste con {email}.</p>
+      <button className="btn ghost block" onClick={logout}>Cambiar de cuenta</button>
+    </Shell>
+  )
+
+  // si estaba en una pestaña de admin y cambia a "ver como analista", lo devolvemos a malla
+  if (!actingAdmin && (tab === 'analistas')) setTab('malla')
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div><div className="eyebrow">MESA DE AYUDA</div><b>Centro de operación</b></div>
+        <div className="userbox">
+          {misEquipos.length > 0 && (misEquipos.length === 1
+            ? <span className="pill slate">{misEquipos[0]}</span>
+            : <select value={equipo} onChange={e => setEquipo(e.target.value)} style={{ padding: '6px 8px', borderRadius: 8 }}>{misEquipos.map(t => <option key={t} value={t}>{t}</option>)}</select>)}
+          {isAdmin && (
+            <button className="btn ghost sm" style={{ border: '1px solid #334155', color: '#cbd5e1' }}
+              onClick={() => setVerComoAnalista(v => !v)}>
+              {verComoAnalista ? '↩ Volver a admin' : '👁 Ver como analista'}
+            </button>
+          )}
+          <div className="uname">{name}</div>
+          <div className={'urole ' + (actingAdmin ? 'admin' : 'analista')}>{actingAdmin ? 'Administrador' : (verComoAnalista ? 'Analista (vista previa)' : 'Analista')}</div>
+          <button className="btn ghost sm" onClick={logout}>Salir</button>
+        </div>
+      </header>
+      <nav className="tabs">
+        <button className={tab === 'malla' ? 'on' : ''} onClick={() => setTab('malla')}>Malla horaria</button>
+        <button className={tab === 'llegada' ? 'on' : ''} onClick={() => setTab('llegada')}>Reporte de llegada</button>
+        <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas {equipo}</button>
+        <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>Productividad</button>
+        <button className={tab === 'zendesk' ? 'on' : ''} onClick={() => setTab('zendesk')}>Malla / Zendesk</button>
+        <button className={tab === 'ingreso' ? 'on' : ''} onClick={() => setTab('ingreso')}>Ingreso diario</button>
+        {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
+      </nav>
+      <main className="wrap">
+        {tab === 'malla' && <Malla email={email} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'llegada' && <Llegada email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'zendesk' && <MallaOp email={email} isAdmin={actingAdmin} equipo={equipo} />}
+        {tab === 'ingreso' && <IngresoMarca marca={equipo} />}
+        {tab === 'analistas' && actingAdmin && <Analistas />}
+      </main>
+      <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
+    </div>
+  )
+}
+
+function Shell({ children }) {
+  return <div className="center"><div className="card auth">{children}</div></div>
+}
+
+/* ================= MALLA ================= */
+function Malla({ email, isAdmin, equipo }) {
+  const [month, setMonth] = useState(curMonth())
+  const [months, setMonths] = useState([])
+  const [rows, setRows] = useState([])
+  const [analysts, setAnalysts] = useState([])
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  const enEquipo = a => String(a.equipos || 'DOCUM').split(',').map(x => x.trim()).includes(equipo)
+  const load = useCallback(async () => {
+    const { data: ms } = await supabase.from('malla').select('month').eq('equipo', equipo)
+    const uniq = [...new Set((ms || []).map(r => r.month))].sort()
+    setMonths(uniq)
+    const { data } = await supabase.from('malla').select('*').eq('equipo', equipo).eq('month', month).order('work_date')
+    setRows(data || [])
+    const { data: an } = await supabase.from('analysts').select('*').order('name')
+    setAnalysts((an || []).filter(a => String(a.equipos || 'DOCUM').split(',').map(x => x.trim()).includes(equipo)))
+  }, [month, equipo])
+  useEffect(() => { load() }, [load])
+
+  const generar = async (targetMonth) => {
+    if (!confirm(`¿Generar la malla de ${monthLabel(targetMonth)}? Reemplaza lo que haya en ese mes.`)) return
+    setBusy(true); setMsg('')
+    const fest = new Set(FESTIVOS_2026)
+    const [y, mo] = targetMonth.split('-').map(Number)
+    const days = new Date(y, mo, 0).getDate()
+    const nuevos = []
+    const push = (iso, dow, a, tid) => {
+      const p = SHIFTS[tid]
+      nuevos.push({ equipo, month: targetMonth, work_date: iso, analyst_email: a.email, analyst_name: a.name,
+        turno_id: tid, ingreso: p.in, salida: p.out, almuerzo: p.lunch, ht: p.ht })
+    }
+    for (let d = 1; d <= days; d++) {
+      const date = new Date(y, mo - 1, d)
+      const dow = date.getDay()
+      if (dow === 0) continue
+      const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      if (fest.has(iso)) continue
+      const n = analysts.length
+      const wk = isoWeek(date)
+      const i85 = ((wk % n) + n) % n        // quien va en 8 a 5 esa semana
+      const iSat = (((wk + 1) % n) + n) % n // quien hace sábado (es de 7 a 4)
+      if (dow >= 1 && dow <= 5) {
+        analysts.forEach((a, idx) => {
+          if (idx === iSat && dow === 5) return // el de sábado descansa el viernes
+          push(iso, dow, a, idx === i85 ? 't_85' : 't_74')
+        })
+      } else if (dow === 6) {
+        push(iso, dow, analysts[iSat], 't_sab')
+      }
+    }
+    await supabase.from('malla').delete().eq('equipo', equipo).eq('month', targetMonth)
+    const { error } = await supabase.from('malla').insert(nuevos)
+    setBusy(false)
+    if (error) { setMsg('Error: ' + error.message); return }
+    setMonth(targetMonth); setMsg(`Malla de ${monthLabel(targetMonth)} generada.`)
+    load()
+  }
+
+  const borrarMes = async () => {
+    if (!confirm(`¿Borrar por completo la malla de ${monthLabel(month)}? Esta acción no se puede deshacer.`)) return
+    setBusy(true); setMsg('')
+    const { error } = await supabase.from('malla').delete().eq('equipo', equipo).eq('month', month)
+    setBusy(false)
+    if (error) { setMsg('Error: ' + error.message); return }
+    setMsg(`Malla de ${monthLabel(month)} borrada.`); load()
+  }
+
+  // agrupar por semana
+  const byWeek = {}
+  const map = {}
+  rows.forEach(r => { (map[r.analyst_email] = map[r.analyst_email] || {})[r.work_date] = r })
+  if (rows.length) {
+    const [y, mo] = month.split('-').map(Number)
+    const days = new Date(y, mo, 0).getDate()
+    for (let d = 1; d <= days; d++) {
+      const date = new Date(y, mo - 1, d); const dow = date.getDay(); if (dow === 0) continue
+      const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      const wk = isoWeek(date);
+      (byWeek[wk] = byWeek[wk] || []).push({ iso, dow, dd: String(d).padStart(2, '0') })
+    }
+  }
+  const festSet = new Set(FESTIVOS_2026)
+  const totals = {}; rows.forEach(r => { totals[r.analyst_email] = (totals[r.analyst_email] || 0) + Number(r.ht || 0) })
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh">
+          <div><b>Malla horaria — {monthLabel(month)}</b>
+            <div className="muted sm">{isAdmin ? 'Genera meses y consulta la malla del equipo.' : 'Consulta tu malla del mes.'}</div></div>
+          <div className="row">
+            {months.length > 0 &&
+              <select value={month} onChange={e => setMonth(e.target.value)}>
+                {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+              </select>}
+            {isAdmin && <button className="btn primary" disabled={busy || !analysts.length}
+              onClick={() => generar(months.length ? nextMonthOf(months[months.length - 1]) : curMonth())}>
+              {busy ? 'Generando…' : `Generar ${monthLabel(months.length ? nextMonthOf(months[months.length - 1]) : curMonth())}`}
+            </button>}
+            {isAdmin && rows.length > 0 && <button className="btn ghost" style={{ color: 'var(--rose)' }} disabled={busy}
+              onClick={borrarMes}>Borrar malla de {monthLabel(month)}</button>}
+          </div>
+        </div>
+        {msg && <div className="notice">{msg}</div>}
+        {rows.length === 0
+          ? <div className="empty">{isAdmin ? 'No hay malla para este mes. Usa «Generar».' : 'Aún no hay malla publicada para este mes.'}</div>
+          : Object.keys(byWeek).map(wk => {
+            const dates = byWeek[wk]
+            const satDate = dates.find(x => x.dow === 6)
+            let satName = ''
+            if (satDate) analysts.forEach(a => { if (map[a.email]?.[satDate.iso]) satName = a.name })
+            return (
+              <div className="week" key={wk}>
+                <div className="weekh">SEMANA {wk}{satName && <> · <span className="sat">Sábado: {satName}</span></>}</div>
+                <div className="scroll">
+                  <table className="mtab">
+                    <thead><tr><th className="left">Analista</th>
+                      {dates.map(x => <th key={x.iso}>{DIAS[x.dow]} {x.dd}{festSet.has(x.iso) && <><br /><span className="fest">FESTIVO</span></>}</th>)}
+                    </tr></thead>
+                    <tbody>
+                      {analysts.map(a => (
+                        <tr key={a.email}>
+                          <td className="left an">{a.name}</td>
+                          {dates.map(x => {
+                            const r = map[a.email]?.[x.iso]
+                            if (r) return <td key={x.iso}><b>{r.ingreso}→{r.salida}</b><div className="muted xs">Alm {r.almuerzo} · {r.ht}h</div></td>
+                            if (festSet.has(x.iso)) return <td key={x.iso}><span className="fest">Festivo</span></td>
+                            return <td key={x.iso}><span className="off">—</span></td>
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )
+          })}
+      </div>
+      {rows.length > 0 &&
+        <div className="card">
+          <div className="cardh"><b>Resumen de horas</b></div>
+          <div className="scroll"><table><thead><tr><th>Analista</th><th>Horas del mes</th><th>Meta</th></tr></thead>
+            <tbody>{analysts.map(a => <tr key={a.email}><td>{a.name}</td><td>{(totals[a.email] || 0).toFixed(1)} h</td><td className="muted">{TARGET} h</td></tr>)}</tbody>
+          </table></div>
+        </div>}
+    </>
+  )
+}
+
+/* ================= LLEGADA ================= */
+function Llegada({ email, name, isAdmin, equipo }) {
+  const [arrivals, setArrivals] = useState([])
+  const [targetEmail, setTargetEmail] = useState(isAdmin ? '' : email)
+  const [pending, setPending] = useState(null)
+  const [reason, setReason] = useState('')
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('arrivals').select('*').eq('equipo', equipo).order('work_date', { ascending: false }).order('llego', { ascending: false })
+    setArrivals(data || [])
+  }, [equipo])
+  useEffect(() => { load() }, [load])
+
+  const check = async () => {
+    setMsg(null); setPending(null)
+    const em = (isAdmin ? targetEmail : email).trim().toLowerCase()
+    if (!em) return
+    const today = bogotaDateISO()
+    const { data: dup } = await supabase.from('arrivals').select('id,llego,estado').eq('email', em).eq('work_date', today).maybeSingle()
+    if (dup) { setMsg({ t: 'info', m: `Ya hay llegada hoy a las ${dup.llego} (${dup.estado}).` }); return }
+    const { data: mrow } = await supabase.from('malla').select('ingreso,analyst_name').eq('equipo', equipo).eq('analyst_email', em).eq('work_date', today).maybeSingle()
+    const nowHM = bogotaHM(); const nowMin = toMin(nowHM)
+    const expected = mrow?.ingreso || null
+    const late = expected ? nowMin > toMin(expected) + GRACE : false
+    setPending({ em, name: mrow?.analyst_name || name, expected, nowHM, late })
+  }
+
+  const confirm = async () => {
+    if (!pending) return
+    if (pending.late && !reason.trim()) { setMsg({ t: 'err', m: 'Indica el motivo de la llegada tarde.' }); return }
+    const rec = {
+      equipo, work_date: bogotaDateISO(), email: pending.em, name: pending.name,
+      llego: pending.nowHM, esperado: pending.expected || '—',
+      estado: pending.late ? 'tarde' : 'a tiempo', motivo: pending.late ? reason.trim() : null,
+    }
+    const { error } = await supabase.from('arrivals').insert(rec)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: `Llegada registrada — ${rec.estado}.` }); setPending(null); setReason(''); load()
+  }
+
+  const mine = isAdmin ? arrivals : arrivals.filter(a => a.email === email)
+  const late = mine.filter(a => a.estado === 'tarde')
+
+  // resumen admin
+  const agg = {}
+  if (isAdmin) arrivals.forEach(a => { const k = a.name || a.email; agg[k] = agg[k] || { a: 0, t: 0 }; a.estado === 'tarde' ? agg[k].t++ : agg[k].a++ })
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh"><b>Marcar llegada</b><div className="muted sm">Tolerancia de 10 minutos sobre la hora de ingreso de tu turno.</div></div>
+        <div className="row end">
+          <label className="f" style={{ flex: 1 }}>Correo del analista
+            <input type="email" value={isAdmin ? targetEmail : email} disabled={!isAdmin}
+              placeholder="nombre@empresa.com" onChange={e => setTargetEmail(e.target.value)} />
+            {!isAdmin && <span className="xs muted">Solo puedes marcar tu propia llegada.</span>}
+          </label>
+          <button className="btn primary" onClick={check}>Verificar y marcar</button>
+        </div>
+        {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : msg.t === 'ok' ? 'ok' : '')}>{msg.m}</div>}
+        {pending && (
+          <div className="panel">
+            <div><b>{pending.name}</b> · <span className="muted">Hora actual {pending.nowHM}</span></div>
+            <div className="muted sm">{pending.expected
+              ? <>Turno de hoy: ingreso <b>{pending.expected}</b> (tolerancia hasta {fmtHM(toMin(pending.expected) + GRACE)})</>
+              : <>Hoy no tienes turno en la malla. Se registra sin evaluar tardanza.</>}</div>
+            {pending.late
+              ? <div style={{ marginTop: 10 }}><div className="warn">⚠ Llegada tarde — indica el motivo</div>
+                <textarea rows={2} value={reason} onChange={e => setReason(e.target.value)} placeholder="¿Por qué llegaste tarde?" /></div>
+              : <div className="okline" style={{ marginTop: 10 }}>✓ Dentro de la tolerancia — a tiempo</div>}
+            <button className="btn primary" style={{ marginTop: 10 }} onClick={confirm}>Confirmar llegada</button>
+          </div>
+        )}
+      </div>
+
+      {isAdmin
+        ? <div className="card"><div className="cardh"><b>Tardanzas por analista</b><div className="muted sm">Todo el equipo.</div></div>
+          <div className="scroll"><table><thead><tr><th>Analista</th><th>A tiempo</th><th>Tarde</th></tr></thead>
+            <tbody>{Object.keys(agg).map(k => <tr key={k}><td>{k}</td><td>{agg[k].a}</td><td><span className={'pill ' + (agg[k].t ? 'amber' : 'slate')}>{agg[k].t}</span></td></tr>)}
+              {Object.keys(agg).length === 0 && <tr><td colSpan={3} className="muted">Sin registros.</td></tr>}</tbody></table></div></div>
+        : <div className="card"><div className="cardh"><b>Mi resumen</b></div>
+          <div className="row"><span className="pill green">A tiempo: {mine.length - late.length}</span><span className="pill amber">Tarde: {late.length}</span></div>
+          {late.length > 0 && <p className="muted sm" style={{ marginTop: 8 }}>Días tarde: {late.map(l => l.work_date).join(', ')}</p>}</div>}
+
+      <div className="card">
+        <div className="cardh"><b>{isAdmin ? 'Historial (todos)' : 'Mi historial'}</b><div className="muted sm">{mine.length} registros</div></div>
+        {mine.length === 0 ? <div className="empty">Aún no hay llegadas.</div>
+          : <div className="scroll"><table><thead><tr><th>Fecha</th>{isAdmin && <th>Analista</th>}<th>Llegó</th><th>Esperado</th><th>Estado</th><th>Motivo</th></tr></thead>
+            <tbody>{mine.map(r => <tr key={r.id}><td className="muted">{r.work_date}</td>{isAdmin && <td>{r.name}</td>}
+              <td>{r.llego}</td><td className="muted">{r.esperado}</td>
+              <td><span className={'pill ' + (r.estado === 'tarde' ? 'amber' : 'green')}>{r.estado === 'tarde' ? 'Tarde' : 'A tiempo'}</span></td>
+              <td>{r.motivo || '—'}</td></tr>)}</tbody></table></div>}
+      </div>
+    </>
+  )
+}
+
+/* ================= PROBLEMAS DOCUM ================= */
+function Problemas({ email, name, isAdmin, equipo }) {
+  const [problems, setProblems] = useState([])
+  const [cases, setCases] = useState([])
+  const [analysts, setAnalysts] = useState([])
+  const [openId, setOpenId] = useState(null)
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [msg, setMsg] = useState(null)
+  // formulario de caso por problema
+  const [cf, setCf] = useState({ ticket: '', analystId: '', resolved: false, note: '' })
+
+  const load = useCallback(async () => {
+    const { data: p } = await supabase.from('problems').select('*').eq('equipo', equipo).order('created_at', { ascending: false })
+    const { data: c } = await supabase.from('problem_cases').select('*').order('created_at', { ascending: true })
+    const { data: a } = await supabase.from('analysts').select('*').order('name')
+    setProblems(p || []); setCases(c || []); setAnalysts(a || [])
+  }, [equipo])
+  useEffect(() => { load() }, [load])
+
+  const casesOf = (pid) => cases.filter(c => c.problem_id === pid)
+
+  const addProblem = async () => {
+    if (!title.trim()) return
+    const { error } = await supabase.from('problems').insert({ equipo, title: title.trim(), description: desc.trim(), created_by: email })
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setTitle(''); setDesc(''); setMsg({ t: 'ok', m: 'Problema creado.' }); load()
+  }
+  const removeProblem = async (pid) => {
+    if (!confirm('¿Eliminar el problema y todos sus casos?')) return
+    await supabase.from('problems').delete().eq('id', pid); load()
+  }
+  const addCase = async (pid) => {
+    if (!cf.ticket.trim()) return
+    const an = analysts.find(a => a.id === cf.analystId)
+    const { error } = await supabase.from('problem_cases').insert({
+      problem_id: pid, ticket: cf.ticket.trim(),
+      analyst_email: an?.email || null, analyst_name: an?.name || null,
+      resolved: cf.resolved, note: cf.note.trim() || null, created_by: email,
+    })
+    if (error) { alert('Error: ' + error.message); return }
+    setCf({ ticket: '', analystId: '', resolved: false, note: '' }); load()
+  }
+  const toggleCase = async (c) => { await supabase.from('problem_cases').update({ resolved: !c.resolved }).eq('id', c.id); load() }
+  const removeCase = async (id) => { await supabase.from('problem_cases').delete().eq('id', id); load() }
+
+  return (
+    <>
+      {/* Dash solo para admin */}
+      {isAdmin && problems.length > 0 && (
+        <div className="card">
+          <div className="cardh"><b>Resumen de problemas</b><div className="muted sm">Solo administrador</div></div>
+          <div className="scroll">
+            <table><thead><tr><th>Problema</th><th>Casos</th><th>Resueltos</th><th>Pendientes</th></tr></thead>
+              <tbody>{problems.map(p => {
+                const cs = casesOf(p.id), sol = cs.filter(c => c.resolved).length
+                return <tr key={p.id}><td style={{ fontWeight: 600, color: 'var(--ink)' }}>{p.title}</td>
+                  <td><span className="pill" style={{ background: 'var(--ink)', color: '#fff' }}>{cs.length}</span></td>
+                  <td className="tabular" style={{ color: 'var(--emerald)' }}>{sol}</td>
+                  <td className="tabular" style={{ color: 'var(--amber)' }}>{cs.length - sol}</td></tr>
+              })}</tbody></table>
+          </div>
+        </div>
+      )}
+
+      {/* Crear problema (solo admin) */}
+      {isAdmin && (
+        <div className="card">
+          <div className="cardh"><b>Registrar un problema</b><div className="muted sm">Solo el administrador crea problemas.</div></div>
+          <div className="grid" style={{ gridTemplateColumns: '1fr' }}>
+            <input placeholder="Título (ej: Problema testigos)" value={title} onChange={e => setTitle(e.target.value)} />
+            <textarea rows={2} placeholder="Descripción breve del problema" value={desc} onChange={e => setDesc(e.target.value)} />
+          </div>
+          {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 10 }}>{msg.m}</div>}
+          <button className="btn primary" style={{ marginTop: 12 }} onClick={addProblem} disabled={!title.trim()}>Crear problema</button>
+        </div>
+      )}
+
+      {/* Lista de problemas */}
+      {problems.length === 0
+        ? <div className="card"><div className="empty">Aún no hay problemas registrados.</div></div>
+        : problems.map(p => {
+          const cs = casesOf(p.id), sol = cs.filter(c => c.resolved).length, open = openId === p.id
+          return (
+            <div className="card" key={p.id}>
+              <div className="cardh">
+                <div><b>⚠ {p.title}</b>{p.description && <div className="muted sm">{p.description}</div>}</div>
+                <div className="row" style={{ alignItems: 'center' }}>
+                  <span className="pill" style={{ background: 'var(--ink)', color: '#fff' }}>{cs.length} {cs.length === 1 ? 'caso' : 'casos'}</span>
+                  <span className="pill green">{sol} resueltos</span>
+                  <button className="btn ghost sm" onClick={() => setOpenId(open ? null : p.id)}>{open ? 'Ocultar' : 'Ver casos'}</button>
+                  {isAdmin && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeProblem(p.id)}>Eliminar</button>}
+                </div>
+              </div>
+              {open && (
+                <>
+                  {/* Agregar caso (analista o admin) */}
+                  <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', background: '#f8fafc', padding: 12, borderRadius: 9, margin: '4px 0 14px' }}>
+                    <label className="f"># Ticket<input placeholder="Ej: 483920" value={cf.ticket} onChange={e => setCf({ ...cf, ticket: e.target.value })} /></label>
+                    <label className="f">Atendido por
+                      <select value={cf.analystId} onChange={e => setCf({ ...cf, analystId: e.target.value })}>
+                        <option value="">—</option>{analysts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="f">Nota (opcional)<input placeholder="Detalle breve" value={cf.note} onChange={e => setCf({ ...cf, note: e.target.value })} /></label>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                      <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+                        <input type="checkbox" style={{ width: 'auto' }} checked={cf.resolved} onChange={e => setCf({ ...cf, resolved: e.target.checked })} /> ¿Solución?
+                      </label>
+                      <button className="btn primary sm" onClick={() => addCase(p.id)} disabled={!cf.ticket.trim()}>Agregar ticket</button>
+                    </div>
+                  </div>
+                  {cs.length === 0 ? <div className="empty">Sin casos aún.</div> : (
+                    <div className="scroll">
+                      <table><thead><tr><th>#</th><th># Ticket</th><th>Analista</th><th>Nota</th><th>Solución</th><th></th></tr></thead>
+                        <tbody>{cs.map((c, i) => (
+                          <tr key={c.id}>
+                            <td className="muted tabular">{i + 1}</td>
+                            <td className="tabular" style={{ fontWeight: 600, color: 'var(--ink)' }}>{c.ticket}</td>
+                            <td>{c.analyst_name || <span className="muted">Sin asignar</span>}</td>
+                            <td className="muted">{c.note || '—'}</td>
+                            <td><button className={'pill ' + (c.resolved ? 'green' : 'amber')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => toggleCase(c)}>{c.resolved ? 'Sí' : 'No'}</button></td>
+                            <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeCase(c.id)}>✕</button></td>
+                          </tr>
+                        ))}</tbody></table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        })}
+    </>
+  )
+}
+
+/* ================= ANALISTAS / PERSONAS Y PROYECTOS (solo admin) ================= */
+function Analistas() {
+  const [analysts, setAnalysts] = useState([])
+  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', skill: '' })
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('analysts').select('*').order('name')
+    setAnalysts(data || [])
+  }, [])
+  useEffect(() => { load() }, [])
+
+  const add = async () => {
+    setMsg(null)
+    const nm = form.name.trim(), em = form.email.trim().toLowerCase()
+    const eq = (form.equipos.trim() || 'DOCUM').split(',').map(x => x.trim()).filter(Boolean).join(',')
+    if (!nm || !em) return
+    if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, skill: form.skill.trim() })
+    if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
+    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
+  }
+  const save = async (a, patch) => {
+    const { error } = await supabase.from('analysts').update(patch).eq('id', a.id)
+    if (error) setMsg({ t: 'err', m: 'Error: ' + error.message }); else { setMsg({ t: 'ok', m: 'Cambio guardado.' }); load() }
+  }
+  const remove = async (a) => {
+    if (!confirm(`¿Quitar a ${a.name}?`)) return
+    await supabase.from('analysts').delete().eq('id', a.id); load()
+  }
+
+  const equiposExistentes = [...new Set(analysts.flatMap(a => String(a.equipos || '').split(',').map(x => x.trim()).filter(Boolean)))].sort()
+
+  return (
+    <div className="card">
+      <div className="cardh">
+        <div><b>Personas y proyectos</b>
+          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
+      </div>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', marginBottom: 8 }}>
+        <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+        <input type="email" placeholder="correo@empresa.com" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
+        <input placeholder="Equipos (ej: DOCUM,Balu)" value={form.equipos} onChange={e => setForm({ ...form, equipos: e.target.value })} />
+        <input placeholder="Skill (ej: Atencion, Gestion)" value={form.skill} onChange={e => setForm({ ...form, skill: e.target.value })} />
+        <select value={form.rol} onChange={e => setForm({ ...form, rol: e.target.value })}>
+          <option value="analista">Analista</option><option value="admin">Administrador</option>
+        </select>
+        <button className="btn primary" onClick={add} disabled={!form.name.trim() || !form.email.trim()}>Agregar</button>
+      </div>
+      {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      {equiposExistentes.length > 0 && <p className="muted sm" style={{ marginTop: 6 }}>Equipos actuales: {equiposExistentes.join(' · ')}</p>}
+      {analysts.length === 0
+        ? <div className="empty">Aún no hay personas.</div>
+        : <div className="scroll" style={{ marginTop: 8 }}>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th></th></tr></thead>
+              <tbody>{analysts.map(a => (
+                <tr key={a.id}>
+                  <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
+                  <td className="muted">{a.email}</td>
+                  <td><input defaultValue={a.equipos || 'DOCUM'} style={{ padding: '4px 8px', width: 150 }}
+                    onBlur={e => { const v = e.target.value.split(',').map(x => x.trim()).filter(Boolean).join(','); if (v !== (a.equipos || '')) save(a, { equipos: v || 'DOCUM' }) }} /></td>
+                  <td><input defaultValue={a.skill || ''} placeholder="—" style={{ padding: '4px 8px', width: 130 }}
+                    onBlur={e => { if (e.target.value.trim() !== (a.skill || '')) save(a, { skill: e.target.value.trim() }) }} /></td>
+                  <td><select defaultValue={a.rol || 'analista'} style={{ padding: '4px 8px' }} onChange={e => save(a, { rol: e.target.value })}>
+                    <option value="analista">Analista</option><option value="admin">Administrador</option></select></td>
+                  <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
+                </tr>
+              ))}</tbody></table>
+          </div>}
+      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. El correo debe ser el real de Google. Edita "Equipos" (sale del campo para guardar) o "Rol" directamente en la tabla.</p>
+    </div>
+  )
+}
+
+
+/* ================= PRODUCTIVIDAD + NOVEDADES ================= */
+const PROYECTOS = ['UGPP', 'Cimetrya', 'Core Positiva', 'CRM / Fiscalía', 'Tableros', 'Transición / NOC', 'Otro / General']
+const TIPOS_NOV = ['Diligenciamiento de data', 'Capacitación / Reunión', 'Gestión de caso', 'Informe', 'Otro']
+
+function Productividad({ email, name, isAdmin, equipo }) {
+  const [sub, setSub] = useState('detalle')
+  return (
+    <>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="tabs" style={{ background: 'transparent', borderBottom: '1px solid var(--line)', padding: '0 12px' }}>
+          <button style={subBtn(sub === 'detalle')} onClick={() => setSub('detalle')}>Detalle por analista</button>
+          <button style={subBtn(sub === 'novedades')} onClick={() => setSub('novedades')}>Novedades / Actividades extras</button>
+        </div>
+      </div>
+      {sub === 'detalle' && <DetalleProd isAdmin={isAdmin} equipo={equipo} />}
+      {sub === 'novedades' && <Novedades email={email} name={name} isAdmin={isAdmin} equipo={equipo} />}
+    </>
+  )
+}
+function subBtn(on) {
+  return { background: 'none', border: 'none', borderBottom: '2px solid ' + (on ? 'var(--indigo)' : 'transparent'),
+    color: on ? 'var(--ink)' : 'var(--muted)', padding: '12px 14px', fontSize: 14, fontWeight: 500, cursor: 'pointer' }
+}
+
+/* ---------- Detalle por analista (formato por días) ---------- */
+function DetalleProd({ isAdmin, equipo }) {
+  const [periodos, setPeriodos] = useState([])
+  const [periodo, setPeriodo] = useState('')
+  const [rows, setRows] = useState([])
+  const [showPaste, setShowPaste] = useState(false)
+  const [pasteText, setPasteText] = useState('')
+  const [pastePeriodo, setPastePeriodo] = useState('')
+  const [msg, setMsg] = useState(null)
+  const [filtro, setFiltro] = useState(null)
+  const [importing, setImporting] = useState(false)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('productividad').select('*').eq('equipo', equipo).order('analyst_name')
+    const all = data || []
+    const ps = [...new Set(all.map(r => r.periodo))].sort()
+    setPeriodos(ps)
+    const per = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
+    setPeriodo(per)
+    setRows(all.filter(r => r.periodo === per))
+  }, [periodo, equipo])
+  useEffect(() => { load() }, [load])
+
+  // ---- cálculos por analista a partir de los días ----
+  const esNum = v => v != null && v !== '' && !isNaN(Number(v))
+  const stats = (r) => {
+    const dias = r.dias || {}
+    const trabajados = Object.keys(dias).filter(d => esNum(dias[d]))          // días con número
+    const casos = trabajados.reduce((s, d) => s + Number(dias[d]), 0)
+    const nd = trabajados.length
+    const prom = nd ? casos / nd : null
+    const meta = Number(r.meta) || 0
+    const cumpl = (meta > 0 && nd > 0) ? (casos / (meta * nd)) * 100 : null
+    return { casos, nd, prom, cumpl, meta }
+  }
+  const estado = (c) => c == null ? ['slate', 'Sin dato', 's'] : c >= 100 ? ['green', 'Cumple', 'v'] : c >= 90 ? ['amber', 'Próximo', 'a'] : ['rose', 'No cumple', 'r']
+  const nf = (n) => n == null ? '—' : Number(n).toLocaleString('es-CO', { maximumFractionDigits: 1 })
+
+  const detalle = rows.map(r => { const s = stats(r); return { ...r, ...s, est: estado(s.cumpl) } })
+  const shown = filtro ? detalle.filter(r => r.est[2] === filtro) : detalle
+  const nCumple = detalle.filter(r => r.est[2] === 'v').length
+  const nProx = detalle.filter(r => r.est[2] === 'a').length
+  const nNo = detalle.filter(r => r.est[2] === 'r').length
+
+  // ---- KPIs del mes (suma de todos los analistas por día) ----
+  const serieDia = {}
+  rows.forEach(r => { const d = r.dias || {}; Object.keys(d).forEach(k => { if (esNum(d[k])) serieDia[k] = (serieDia[k] || 0) + Number(d[k]) }) })
+  const diasOrden = Object.keys(serieDia).map(Number).sort((a, b) => a - b)
+  const totalMes = diasOrden.reduce((s, d) => s + serieDia[d], 0)
+  const diasHabiles = diasOrden.length
+  const promHabil = diasHabiles ? Math.round(totalMes / diasHabiles) : 0
+  const diaPico = diasOrden.length ? diasOrden.reduce((a, b) => serieDia[b] > serieDia[a] ? b : a, diasOrden[0]) : null
+  const ultimoDia = diasOrden.length ? Math.max(...diasOrden) : 0
+  const proyeccion = diasHabiles ? Math.round(totalMes + promHabil * Math.max(0, (26 - diasHabiles))) : totalMes // estimado simple
+  const cumpliendoMeta = detalle.filter(r => r.cumpl != null)
+  const pctCumpliendo = cumpliendoMeta.length ? Math.round(cumpliendoMeta.filter(r => r.cumpl >= 100).length / cumpliendoMeta.length * 100) : 0
+
+  const guardarPegado = async () => {
+    setMsg(null)
+    const per = pastePeriodo.trim()
+    if (!per) { setMsg({ t: 'err', m: 'Escribe el período (ej: Agosto 2026).' }); return }
+    const lineas = pasteText.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim())
+    const parsed = []
+    for (const l of lineas) {
+      const cols = l.includes('\t') ? l.split('\t') : l.split(/;|,(?=\S)/)
+      const nombre = (cols[0] || '').trim()
+      if (!nombre || /analista/i.test(nombre)) continue
+      const meta = parseFloat(String(cols[1] || '').replace(/[^\d.,-]/g, '').replace(',', '.')) || null
+      const dias = {}
+      for (let i = 2; i < cols.length; i++) {
+        const raw = String(cols[i] ?? '').trim()
+        const dayNum = i - 1 // día 1 = columna índice 2
+        if (raw === '' ) { continue }
+        if (/^d(escanso)?$/i.test(raw)) { dias[dayNum] = 'D'; continue }
+        const n = parseFloat(raw.replace(/[^\d.,-]/g, '').replace(',', '.'))
+        if (!isNaN(n)) dias[dayNum] = n
+      }
+      parsed.push({ equipo, periodo: per, analyst_name: nombre, meta, dias })
+    }
+    if (parsed.length === 0) { setMsg({ t: 'err', m: 'No se detectaron filas. Copia: Analista, Meta y del día 1 al 31.' }); return }
+    await supabase.from('productividad').delete().eq('equipo', equipo).eq('periodo', per)
+    const { error } = await supabase.from('productividad').insert(parsed)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: `${parsed.length} analistas cargados en ${per}.` })
+    setPasteText(''); setShowPaste(false); setPeriodo(per); load()
+  }
+
+  // ---- Carga directa del Excel exportado de Zendesk (hoja "Tickets únicos por asesor") ----
+  async function importarExcel(file) {
+    setImporting(true); setMsg(null)
+    try {
+      const buf = await file.arrayBuffer()
+      const wb = XLSX.read(new Uint8Array(buf), { type: 'array' })
+      const sName = wb.SheetNames.find(n => /asesor/i.test(n)) || wb.SheetNames[0]
+      const rowsX = XLSX.utils.sheet_to_json(wb.Sheets[sName], { header: 1, defval: '' })
+      const header = rowsX[0] || []
+      const dayCols = []; header.forEach((h, j) => { if (/^\d{2}\b/.test(String(h))) dayCols.push([j, parseInt(String(h), 10)]) })
+      // periodo desde la hoja de detalle (fecha real)
+      let mes = ''
+      const dName = wb.SheetNames.find(n => /detalle/i.test(n))
+      if (dName) { const c = wb.Sheets[dName]['C2']; if (c && /^\d{4}-\d{2}/.test(String(c.v))) { const [y, m] = String(c.v).split('-'); mes = MES[+m] + ' ' + y } }
+      const a = dayCols[0]?.[1], b = dayCols[dayCols.length - 1]?.[1]
+      const periodoX = (mes || 'Corte') + (a ? ` · ${String(a).padStart(2, '0')}-${String(b).padStart(2, '0')}` : '')
+      // catálogo: marca + meta por analista
+      const { data: cat } = await supabase.from('productividad_analistas').select('analista,marca,meta').eq('activo', true)
+      const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+      const idx = {}; (cat || []).forEach(c => { idx[norm(c.analista)] = c })
+      const lookup = nm => {
+        const k = norm(nm); if (idx[k]) return idx[k]
+        const wn = new Set(k.split(' ').filter(w => w.length > 2))
+        for (const key in idx) { let n = 0; key.split(' ').forEach(w => { if (w.length > 2 && wn.has(w)) n++ }); if (n >= 2) return idx[key] }
+        return null
+      }
+      const BOTS = new Set(['ai agent', 'zendesk', 'automation'])
+      const parsed = []
+      for (let i = 1; i < rowsX.length; i++) {
+        const nombre = String(rowsX[i][0] || '').trim(); if (!nombre || BOTS.has(norm(nombre))) continue
+        const c = lookup(nombre); const marca = c ? c.marca : 'Sin marca'
+        if (marca !== equipo) continue                 // solo el equipo seleccionado
+        const dias = {}
+        dayCols.forEach(([j, d]) => { const v = rowsX[i][j]; if (typeof v === 'number' && v > 0) dias[d] = v })
+        if (Object.keys(dias).length === 0) continue
+        parsed.push({ equipo, periodo: periodoX, analyst_name: nombre, meta: c ? c.meta : 20, dias })
+      }
+      if (!parsed.length) { setMsg({ t: 'err', m: `No encontré analistas de ${equipo} en el archivo. Revisa que su marca en productividad_analistas sea exactamente "${equipo}".` }); setImporting(false); return }
+      await supabase.from('productividad').delete().eq('equipo', equipo).eq('periodo', periodoX)
+      const { error } = await supabase.from('productividad').insert(parsed)
+      setImporting(false)
+      if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+      setMsg({ t: 'ok', m: `${parsed.length} analistas de ${equipo} cargados en ${periodoX}.` })
+      setPeriodo(periodoX); load()
+    } catch (err) { setImporting(false); setMsg({ t: 'err', m: 'No pude leer el Excel: ' + err.message }) }
+  }
+
+  const kpi = (lab, val, sub, color) => (
+    <div className="card" style={{ margin: 0, borderTop: '4px solid ' + color, padding: '14px 16px' }}>
+      <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.3px' }}>{lab}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--ink)', margin: '2px 0' }}>{val}</div>
+      <div className="muted sm">{sub}</div>
+    </div>
+  )
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh">
+          <div><b>Productividad DOCUM</b><div className="muted sm">Carga el Excel de Zendesk o pega el formato por días. Descanso ("D") o vacío = día no trabajado.</div></div>
+          <div className="row">
+            {periodos.length > 0 && <select value={periodo} onChange={e => { setPeriodo(e.target.value); setFiltro(null) }}>
+              {periodos.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>}
+            {isAdmin && <>
+              <button className="btn primary" onClick={() => document.getElementById('prod-xlsx').click()} disabled={importing}>
+                {importing ? 'Cargando…' : 'Cargar Excel de Zendesk'}
+              </button>
+              <input id="prod-xlsx" type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
+                onChange={e => { const f = e.target.files[0]; if (f) importarExcel(f); e.target.value = '' }} />
+            </>}
+            {isAdmin && <button className="btn ghost" onClick={() => { setShowPaste(v => !v); setPastePeriodo(periodo || '') }}>
+              {showPaste ? 'Cerrar' : 'Pegar datos'}
+            </button>}
+          </div>
+        </div>
+        {isAdmin && showPaste && (
+          <div className="panel" style={{ marginTop: 0 }}>
+            <label className="f">Período<input placeholder="Ej: Agosto 2026" value={pastePeriodo} onChange={e => setPastePeriodo(e.target.value)} /></label>
+            <p className="muted sm" style={{ margin: '10px 0 6px' }}>
+              Copia desde tu documento (solo DOCUM) las columnas <b>Analista · Meta Diaria · día 1 · día 2 · … · día 31</b> y pégalas aquí. Los días de descanso pueden venir con "D" o vacíos.
+            </p>
+            <textarea rows={7} placeholder={"Sofia Estrella Beltran\t20\t\t\t41\t45\t...\nDaniel Munar\t20\t\t\t27\tD\t..."} value={pasteText} onChange={e => setPasteText(e.target.value)} style={{ fontFamily: 'monospace', whiteSpace: 'pre', overflowWrap: 'normal' }} />
+            {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 8 }}>{msg.m}</div>}
+            <button className="btn primary" style={{ marginTop: 10 }} onClick={guardarPegado}>Guardar datos</button>
+          </div>
+        )}
+        {!showPaste && msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      </div>
+
+      {rows.length > 0 && (
+        <>
+          {/* KPIs */}
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(175px,1fr))', marginBottom: 18 }}>
+            {kpi('Casos ' + periodo, nf(totalMes), rows.length + ' analistas · al día ' + ultimoDia, 'var(--ink)')}
+            {kpi('Proyección cierre', nf(proyeccion), 'ritmo hábil a fin de mes', 'var(--rose)')}
+            {kpi('Día pico', diaPico ? 'Día ' + diaPico : '—', diaPico ? nf(serieDia[diaPico]) + ' casos' : '—', 'var(--amber)')}
+            {kpi('Cumpliendo meta', pctCumpliendo + '%', 'de ' + cumpliendoMeta.length + ' con dato', 'var(--emerald)')}
+            {kpi('Prom. hábil/día', nf(promHabil), 'casos por día hábil', 'var(--ink)')}
+          </div>
+
+          {/* Semáforo */}
+          <div className="card">
+            <div className="cardh"><b>Semáforo de cumplimiento</b><div className="muted sm">Cumple ≥100% · Próximo 90–99% · No cumple &lt;90%. Clic para filtrar.</div></div>
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(3,1fr)' }}>
+              {[['v', 'green', nCumple, 'Cumplen'], ['a', 'amber', nProx, 'Próximos'], ['r', 'rose', nNo, 'No cumplen']].map(s => (
+                <div key={s[0]} onClick={() => setFiltro(filtro === s[0] ? null : s[0])}
+                  style={{ cursor: 'pointer', borderRadius: 10, padding: 14, textAlign: 'center',
+                    border: '2px solid ' + (filtro === s[0] ? 'var(--ink)' : 'transparent'),
+                    background: s[1] === 'green' ? '#ecfdf5' : s[1] === 'amber' ? '#fffbeb' : '#fff1f2' }}>
+                  <div style={{ fontSize: 26, fontWeight: 700, color: s[1] === 'green' ? 'var(--emerald)' : s[1] === 'amber' ? 'var(--amber)' : 'var(--rose)' }}>{s[2]}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{s[3]}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Curva de evolución (casos por día, todos los analistas) */}
+          <div className="card">
+            <div className="cardh"><b>Curva de evolución diaria</b><div className="muted sm">Casos por día trabajado — {periodo}</div></div>
+            <MiniCurva serie={serieDia} dias={diasOrden} />
+          </div>
+
+          {/* Detalle por analista */}
+          <div className="card">
+            <div className="cardh"><b>Detalle por analista</b>{filtro && <button className="btn ghost sm" onClick={() => setFiltro(null)}>Quitar filtro</button>}</div>
+            <div className="scroll">
+              <table><thead><tr><th>Analista</th><th>Meta</th><th>% Cumpl.</th><th>Casos</th><th>Prom/día</th><th>Días</th><th>Estado</th></tr></thead>
+                <tbody>{shown.map(r => (
+                  <tr key={r.id}>
+                    <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{r.analyst_name}</td>
+                    <td className="tabular">{nf(r.meta)}</td>
+                    <td className="tabular"><b>{r.cumpl == null ? '—' : r.cumpl.toFixed(1) + '%'}</b></td>
+                    <td className="tabular">{nf(r.casos)}</td>
+                    <td className="tabular">{r.prom == null ? '—' : r.prom.toFixed(1)}</td>
+                    <td className="tabular muted">{r.nd}</td>
+                    <td><span className={'pill ' + r.est[0]}>{r.est[1]}</span></td>
+                  </tr>
+                ))}</tbody></table>
+            </div>
+            {shown.length > 0 && <p className="muted sm" style={{ marginTop: 8 }}>Mostrando {shown.length} analistas · {nf(shown.reduce((s, r) => s + r.casos, 0))} casos</p>}
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+/* Mini gráfica de líneas en SVG (sin librerías) */
+function MiniCurva({ serie, dias }) {
+  if (!dias || dias.length === 0) return <div className="empty">Sin datos para graficar.</div>
+  const W = 720, H = 240, pad = 34
+  const vals = dias.map(d => serie[d])
+  const max = Math.max(...vals, 1)
+  const x = i => pad + (dias.length === 1 ? 0 : i * (W - pad * 2) / (dias.length - 1))
+  const y = v => H - pad - (v / max) * (H - pad * 2)
+  const pts = dias.map((d, i) => `${x(i)},${y(serie[d])}`).join(' ')
+  return (
+    <div className="scroll">
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: 480, height: 'auto' }}>
+        {[0, .25, .5, .75, 1].map((f, i) => {
+          const yy = H - pad - f * (H - pad * 2)
+          return <g key={i}><line x1={pad} y1={yy} x2={W - pad} y2={yy} stroke="#eef2f7" /><text x={4} y={yy + 3} fontSize="9" fill="#94a3b8">{Math.round(max * f)}</text></g>
+        })}
+        <polyline points={pts} fill="none" stroke="#4f46e5" strokeWidth="2" />
+        {dias.map((d, i) => <circle key={d} cx={x(i)} cy={y(serie[d])} r="3" fill="#4f46e5" />)}
+        {dias.map((d, i) => (i % Math.ceil(dias.length / 15 || 1) === 0) ? <text key={'t' + d} x={x(i)} y={H - pad + 14} fontSize="9" fill="#94a3b8" textAnchor="middle">{d}</text> : null)}
+      </svg>
+    </div>
+  )
+}
+
+
+/* ---------- Novedades / Actividades extras ---------- */
+function Novedades({ email, name, isAdmin, equipo }) {
+  const [analysts, setAnalysts] = useState([])
+  const [items, setItems] = useState([])
+  const [form, setForm] = useState({ analystId: '', proyecto: PROYECTOS[0], tipo: TIPOS_NOV[0], novedad: '' })
+  const [fProy, setFProy] = useState('TODOS')
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data: a } = await supabase.from('analysts').select('*').order('name')
+    const { data: n } = await supabase.from('novedades').select('*').eq('equipo', equipo).order('created_at', { ascending: false })
+    setAnalysts(a || []); setItems(n || [])
+  }, [equipo])
+  useEffect(() => { load() }, [load])
+
+  const registrar = async () => {
+    setMsg(null)
+    if (!form.novedad.trim()) { setMsg({ t: 'err', m: 'Escribe la novedad antes de registrar.' }); return }
+    const an = analysts.find(a => a.id === form.analystId)
+    const { error } = await supabase.from('novedades').insert({
+      equipo, analyst_email: an?.email || email, analyst_name: an?.name || name,
+      proyecto: form.proyecto, tipo: form.tipo, novedad: form.novedad.trim(), created_by: email,
+    })
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setForm({ ...form, novedad: '' }); setMsg({ t: 'ok', m: 'Novedad registrada.' }); load()
+  }
+  const remove = async (id) => { await supabase.from('novedades').delete().eq('id', id); load() }
+
+  const proyectos = [...new Set(items.map(i => i.proyecto).filter(Boolean))]
+  const shown = fProy === 'TODOS' ? items : items.filter(i => i.proyecto === fProy)
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh"><b>Registrar novedad / actividad extra</b><div className="muted sm">Lo que realizaste hoy fuera de la operación normal.</div></div>
+        <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))' }}>
+          <label className="f">Analista
+            <select value={form.analystId} onChange={e => setForm({ ...form, analystId: e.target.value })}>
+              <option value="">(yo)</option>{analysts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+          <label className="f">Proyecto
+            <select value={form.proyecto} onChange={e => setForm({ ...form, proyecto: e.target.value })}>{PROYECTOS.map(p => <option key={p}>{p}</option>)}</select>
+          </label>
+          <label className="f">Tipo
+            <select value={form.tipo} onChange={e => setForm({ ...form, tipo: e.target.value })}>{TIPOS_NOV.map(t => <option key={t}>{t}</option>)}</select>
+          </label>
+          <label className="f" style={{ gridColumn: '1/-1' }}>Novedad (qué realizó)
+            <input placeholder="Describe la novedad…" value={form.novedad} onChange={e => setForm({ ...form, novedad: e.target.value })} />
+          </label>
+        </div>
+        {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 10 }}>{msg.m}</div>}
+        <button className="btn primary" style={{ marginTop: 12 }} onClick={registrar}>Registrar novedad</button>
+      </div>
+
+      <div className="card">
+        <div className="cardh">
+          <div><b>Novedades registradas</b><div className="muted sm">{items.length} en total</div></div>
+          <select value={fProy} onChange={e => setFProy(e.target.value)}>
+            <option value="TODOS">Todos los proyectos</option>{proyectos.map(p => <option key={p}>{p}</option>)}
+          </select>
+        </div>
+        {shown.length === 0 ? <div className="empty">Sin novedades.</div> : (
+          <div className="scroll">
+            <table><thead><tr><th>Fecha</th><th>Analista</th><th>Proyecto</th><th>Tipo</th><th>Novedad</th>{isAdmin && <th></th>}</tr></thead>
+              <tbody>{shown.map(n => (
+                <tr key={n.id}>
+                  <td className="muted tabular">{n.fecha}</td>
+                  <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{n.analyst_name}</td>
+                  <td><span className="pill slate">{n.proyecto || '—'}</span></td>
+                  <td className="muted">{n.tipo || '—'}</td>
+                  <td>{n.novedad}</td>
+                  {isAdmin && <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(n.id)}>✕</button></td>}
+                </tr>
+              ))}</tbody></table>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+/* ================= MALLA OPERATIVA (pegado) + CORTE ZENDESK ================= */
+const normNom = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+// palabras "útiles" de un nombre (ignora conectores y palabras muy cortas)
+const IGNORAR = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'san'])
+const palabrasNombre = s => normNom(s).split(' ').filter(w => w.length >= 3 && !IGNORAR.has(w))
+// ¿dos nombres son la misma persona? coinciden si comparten al menos 2 palabras
+function mismoNombre(a, b) {
+  const A = palabrasNombre(a), B = new Set(palabrasNombre(b))
+  const comunes = A.filter(w => B.has(w))
+  return comunes.length >= 2
+}
+// ¿el nombre de la malla está entre los conectados (lista de nombres)?
+function estaConectado(nombreMalla, listaConectados) {
+  return listaConectados.some(c => mismoNombre(nombreMalla, c))
+}
+const esTurno = v => { const t = String(v || '').trim(); return t !== '' && !/descanso|vacacion|licencia/i.test(t) }
+
+const BUFFER_SALIDA = 10 // se desconectan 10 min antes de salir
+
+// Extrae [entradaMin, salidaMin] de un texto tipo "08:00 a 17:00" (o "8:00-17:00"). Nocheros: salida < entrada => +24h.
+function parseRango(txt) {
+  const m = String(txt || '').match(/(\d{1,2})[:.](\d{2})\s*(?:a|-|—|to)\s*(\d{1,2})[:.](\d{2})/i)
+  if (!m) return null
+  let ini = (+m[1]) * 60 + (+m[2])
+  let fin = (+m[3]) * 60 + (+m[4])
+  if (fin <= ini) fin += 24 * 60 // cruza medianoche
+  return [ini, fin]
+}
+// ¿A la hora de corte (minutos) esta persona debería estar conectada, según su rango?
+function debeEstar(txtTurno, corteMin) {
+  const r = parseRango(txtTurno); if (!r) return false
+  const [ini, fin] = r
+  const finReal = fin - BUFFER_SALIDA
+  // consideramos también el caso nochero: probar el corte tal cual y +24h
+  for (const c of [corteMin, corteMin + 24 * 60]) {
+    if (c >= ini && c < finReal) return true
+  }
+  return false
+}
+
+function MallaOp({ email, isAdmin, equipo }) {
+  const [sub, setSub] = useState('malla')
+  return (
+    <>
+      <div className="card" style={{ padding: 0 }}>
+        <div className="tabs" style={{ background: 'transparent', borderBottom: '1px solid var(--line)', padding: '0 12px' }}>
+          <button style={subBtn(sub === 'malla')} onClick={() => setSub('malla')}>Malla del mes</button>
+          <button style={subBtn(sub === 'corte')} onClick={() => setSub('corte')}>Corte Zendesk</button>
+        </div>
+      </div>
+      {sub === 'malla' && <MallaOpMes email={email} isAdmin={isAdmin} equipo={equipo} />}
+      {sub === 'corte' && <CorteZendesk email={email} isAdmin={isAdmin} equipo={equipo} />}
+    </>
+  )
+}
+
+/* ---------- Carga y vista de la malla operativa ---------- */
+function MallaOpMes({ email, isAdmin, equipo }) {
+  const [periodos, setPeriodos] = useState([])
+  const [periodo, setPeriodo] = useState('')
+  const [rows, setRows] = useState([])
+  const [show, setShow] = useState(false)
+  const [txt, setTxt] = useState('')
+  const [per, setPer] = useState('')
+  const [ident, setIdent] = useState(4)
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('malla_op').select('*').eq('equipo', equipo).order('nombre')
+    const all = data || []
+    const ps = [...new Set(all.map(r => r.periodo))].sort()
+    setPeriodos(ps)
+    const p = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
+    setPeriodo(p); setRows(all.filter(r => r.periodo === p))
+  }, [periodo, equipo])
+  useEffect(() => { load() }, [load])
+
+  const guardar = async () => {
+    setMsg(null)
+    const pr = per.trim(); if (!pr) { setMsg({ t: 'err', m: 'Escribe el período (ej: Septiembre 2026).' }); return }
+    const lineas = txt.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim())
+    const parsed = []
+    for (const l of lineas) {
+      const cols = l.split('\t')
+      const nombre = (cols[0] || '').trim()
+      if (!nombre || /nombre\s*analista/i.test(nombre)) continue
+      const dias = {}
+      for (let i = ident; i < cols.length; i++) {
+        const v = String(cols[i] ?? '').trim()
+        if (v !== '') dias[i - ident + 1] = v
+      }
+      parsed.push({ equipo, periodo: pr, nombre, ubicacion: (cols[1] || '').trim(), area: (cols[2] || '').trim(), dias })
+    }
+    if (parsed.length === 0) { setMsg({ t: 'err', m: 'No se detectaron filas. Revisa que copiaste desde el nombre.' }); return }
+    await supabase.from('malla_op').delete().eq('equipo', equipo).eq('periodo', pr)
+    const { error } = await supabase.from('malla_op').insert(parsed)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: `${parsed.length} personas cargadas en ${pr}.` }); setTxt(''); setShow(false); setPeriodo(pr); load()
+  }
+
+  const maxDay = rows.reduce((m, r) => Math.max(m, ...Object.keys(r.dias || {}).map(Number)), 0)
+  const dayCols = Array.from({ length: maxDay }, (_, i) => i + 1)
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh">
+          <div><b>Malla operativa — {periodo || 'sin período'}</b><div className="muted sm">Malla de {equipo} cargada por pegado. Descanso/Vacaciones/Licencia se ven como texto.</div></div>
+          <div className="row">
+            {periodos.length > 0 && <select value={periodo} onChange={e => setPeriodo(e.target.value)}>{periodos.map(p => <option key={p} value={p}>{p}</option>)}</select>}
+            {isAdmin && <button className="btn primary" onClick={() => { setShow(v => !v); setPer(periodo || '') }}>{show ? 'Cerrar' : 'Cargar malla'}</button>}
+          </div>
+        </div>
+        {isAdmin && show && (
+          <div className="panel" style={{ marginTop: 0 }}>
+            <div className="row">
+              <label className="f" style={{ flex: 1 }}>Período<input placeholder="Ej: Septiembre 2026" value={per} onChange={e => setPer(e.target.value)} /></label>
+              <label className="f">Columnas antes de los días<input type="number" min="3" value={ident} onChange={e => setIdent(Number(e.target.value) || 4)} style={{ width: 90 }} /></label>
+            </div>
+            <p className="muted sm" style={{ margin: '10px 0 6px' }}>
+              Copia de tu Excel: <b>Nombre · Ubicación · Área · Líder · día 1 · día 2 · …</b> y pégalo aquí. (Por defecto se saltan 4 columnas de identidad antes de los días; ajústalo si tu hoja tiene otra cantidad.)
+            </p>
+            <textarea rows={8} value={txt} onChange={e => setTxt(e.target.value)} style={{ fontFamily: 'monospace', whiteSpace: 'pre' }}
+              placeholder={"Brayan Casanova\tCúcuta\tAtención\tJonathan\t08:00 a 17:00\t08:00 a 17:00\t..."} />
+            {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 8 }}>{msg.m}</div>}
+            <button className="btn primary" style={{ marginTop: 10 }} onClick={guardar}>Guardar malla</button>
+          </div>
+        )}
+        {!show && msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
+      </div>
+
+      {rows.length > 0 && (
+        <div className="card">
+          <div className="cardh"><b>{rows.length} personas</b></div>
+          <div className="scroll">
+            <table className="mtab">
+              <thead><tr><th className="left">Nombre</th><th>Ubicación</th><th>Área</th>{dayCols.map(d => <th key={d}>{d}</th>)}</tr></thead>
+              <tbody>{rows.map(r => (
+                <tr key={r.id}>
+                  <td className="left an">{r.nombre}</td>
+                  <td className="muted">{r.ubicacion || '—'}</td>
+                  <td className="muted">{r.area || '—'}</td>
+                  {dayCols.map(d => { const v = r.dias?.[d]; return <td key={d} style={{ whiteSpace: 'nowrap', color: esTurno(v) ? 'var(--ink)' : '#cbd5e1', fontSize: 11 }}>{v || '—'}</td> })}
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+/* ---------- Corte Zendesk: malla del día vs conectados ---------- */
+function CorteZendesk({ email, isAdmin, equipo }) {
+  const [periodos, setPeriodos] = useState([])
+  const [periodo, setPeriodo] = useState('')
+  const [mallaRows, setMallaRows] = useState([])
+  const [fecha, setFecha] = useState(bogotaDateISO())
+  const [hora, setHora] = useState('08:00')
+  const [conectados, setConectados] = useState('')
+  const [resultado, setResultado] = useState(null)
+  const [historial, setHistorial] = useState([])
+  const [abierto, setAbierto] = useState(null)
+  const [proyAbierto, setProyAbierto] = useState(null)
+  const [msg, setMsg] = useState(null)
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('malla_op').select('*').eq('equipo', equipo)
+    const all = data || []
+    const ps = [...new Set(all.map(r => r.periodo))].sort()
+    setPeriodos(ps)
+    const p = periodo && ps.includes(periodo) ? periodo : (ps[ps.length - 1] || '')
+    setPeriodo(p); setMallaRows(all.filter(r => r.periodo === p))
+    const { data: h } = await supabase.from('cortes').select('*').eq('equipo', equipo).order('created_at', { ascending: false })
+    setHistorial(h || [])
+  }, [periodo, equipo])
+  useEffect(() => { load() }, [load])
+
+  const comparar = () => {
+    setMsg(null); setResultado(null)
+    const dia = new Date(fecha + 'T12:00:00').getDate()
+    const hm = String(hora || '').match(/(\d{1,2})[:.](\d{2})/)
+    if (!hm) { setMsg({ t: 'err', m: 'Escribe la hora de corte en formato 24h, ej: 09:50 o 21:50.' }); return }
+    const corteMin = (+hm[1]) * 60 + (+hm[2])
+    // solo quienes YA deberían estar conectados a esa hora, según su rango de turno
+    const enMalla = mallaRows
+      .filter(r => esTurno(r.dias?.[dia]) && debeEstar(r.dias[dia], corteMin))
+      .map(r => ({ nombre: r.nombre, hora: r.dias[dia], area: (r.area || 'Sin área').trim() || 'Sin área' }))
+    if (enMalla.length === 0) { setMsg({ t: 'err', m: `A las ${hora} del día ${dia} nadie debería estar según la malla de ${periodo || 'este período'}. Revisa fecha, hora y período.` }); return }
+    const listaCon = conectados.split('\n').map(x => x.trim()).filter(Boolean)
+    const marcar = x => ({ ...x, conectado: estaConectado(x.nombre, listaCon) })
+    const gente = enMalla.map(marcar)
+    const presentes = gente.filter(x => x.conectado)
+    const faltan = gente.filter(x => !x.conectado)
+    // conectados que no cruzaron con nadie de la malla del turno
+    const demas = listaCon.filter(c => !enMalla.some(x => mismoNombre(x.nombre, c)))
+    // desglose por proyecto (área)
+    const areas = {}
+    gente.forEach(x => { const k = x.area; (areas[k] = areas[k] || { area: k, gente: [] }).gente.push(x) })
+    const porProyecto = Object.values(areas).map(g => ({
+      area: g.area, total: g.gente.length,
+      conectados: g.gente.filter(p => p.conectado).length,
+      faltan: g.gente.filter(p => !p.conectado).length,
+      gente: g.gente,
+    })).sort((a, b) => b.total - a.total)
+    setResultado({ dia, presentes, faltan, demas, gente, porProyecto, nMalla: enMalla.length, nCon: listaCon.length })
+  }
+
+  const borrarCorte = async (id) => {
+    if (!confirm('¿Eliminar este corte guardado?')) return
+    const { error } = await supabase.from('cortes').delete().eq('id', id)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    load()
+  }
+
+  const guardarCorte = async () => {
+    if (!resultado) return
+    const rec = {
+      equipo, fecha, hora,
+      presentes: resultado.presentes.map(x => x.nombre), faltan: resultado.faltan.map(x => x.nombre), demas: resultado.demas,
+      por_proyecto: resultado.porProyecto, n_malla: resultado.nMalla, n_conectados: resultado.nCon, n_presentes: resultado.presentes.length, created_by: email,
+    }
+    const { error } = await supabase.from('cortes').insert(rec)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: 'Corte guardado.' }); load()
+  }
+
+  return (
+    <>
+      <div className="card">
+        <div className="cardh"><div><b>Corte Zendesk vs Malla</b><div className="muted sm">Compara a UNA hora exacta (24h): quién debía estar conectado según su turno vs. los conectados en Zendesk.</div></div>
+          {periodos.length > 0 && <select value={periodo} onChange={e => setPeriodo(e.target.value)}>{periodos.map(p => <option key={p} value={p}>{p}</option>)}</select>}
+        </div>
+        <div className="row end">
+          <label className="f">Fecha<input type="date" value={fecha} onChange={e => setFecha(e.target.value)} /></label>
+          <label className="f">Hora de corte (24h)<input value={hora} onChange={e => setHora(e.target.value)} placeholder="09:50" style={{ width: 100 }} /></label>
+        </div>
+        <label className="f" style={{ marginTop: 10, display: 'block' }}>Conectados en Zendesk (uno por línea)
+          <textarea rows={7} value={conectados} onChange={e => setConectados(e.target.value)} placeholder={"Brayan Andrey Casanova Florez\nCecilia Catalina Galeano\n..."} />
+        </label>
+        {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 8 }}>{msg.m}</div>}
+        <button className="btn primary" style={{ marginTop: 10 }} onClick={comparar} disabled={!conectados.trim()}>Comparar</button>
+      </div>
+
+      {resultado && (
+        <>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', marginBottom: 18 }}>
+            {[['Debían estar (' + hora + ')', resultado.nMalla, 'var(--ink)'],
+              ['Conectados', resultado.nCon, 'var(--indigo)'],
+              ['Presentes', resultado.presentes.length, 'var(--emerald)'],
+              ['No conectados', resultado.faltan.length, 'var(--rose)']].map((k, i) => (
+              <div key={i} className="card" style={{ margin: 0, borderTop: '4px solid ' + k[2], padding: '14px 16px' }}>
+                <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase' }}>{k[0]}</div>
+                <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--ink)' }}>{k[1]}</div>
+              </div>
+            ))}
+          </div>
+          <div className="card">
+            <div className="cardh"><b>Por proyecto</b><div className="muted sm">Clic en un proyecto para ver quiénes están y quiénes no.</div></div>
+            <div className="scroll">
+              <table><thead><tr><th>Proyecto</th><th>Debían estar</th><th>Conectados</th><th>No conectados</th></tr></thead>
+                <tbody>{resultado.porProyecto.map(p => (
+                  <Fragment key={p.area}>
+                    <tr style={{ cursor: 'pointer' }} onClick={() => setProyAbierto(proyAbierto === p.area ? null : p.area)}>
+                      <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{proyAbierto === p.area ? '▾ ' : '▸ '}{p.area}</td>
+                      <td className="tabular">{p.total}</td>
+                      <td className="tabular" style={{ color: 'var(--emerald)' }}>{p.conectados}</td>
+                      <td><span className={'pill ' + (p.faltan > 0 ? 'rose' : 'green')}>{p.faltan}</span></td>
+                    </tr>
+                    {proyAbierto === p.area && (
+                      <tr><td colSpan={4} style={{ background: '#f8fafc' }}>
+                        {p.gente.map((x, i) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #eef2f7', fontSize: 13 }}>
+                            <span>{x.conectado ? '✓ ' : '✗ '}{x.nombre} <span className="muted">· {x.hora}</span></span>
+                            <span className={'pill ' + (x.conectado ? 'green' : 'rose')} style={{ marginLeft: 8 }}>{x.conectado ? 'Conectado' : 'No conectado'}</span>
+                          </div>
+                        ))}
+                      </td></tr>
+                    )}
+                  </Fragment>
+                ))}</tbody></table>
+            </div>
+          </div>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))' }}>
+            <ListaCorte titulo="✓ Presentes" color="green" items={resultado.presentes.map(x => x.nombre)} />
+            <ListaCorte titulo="✗ No conectados (debían estar)" color="rose" items={resultado.faltan.map(x => `${x.nombre}  ·  ${x.hora}`)} />
+            <ListaCorte titulo="Conectados de más (no en malla)" color="amber" items={resultado.demas} />
+          </div>
+          {isAdmin && <button className="btn primary" style={{ marginTop: 14 }} onClick={guardarCorte}>Guardar este corte</button>}
+        </>
+      )}
+
+      {historial.length > 0 && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <div className="cardh"><b>Cortes guardados</b><div className="muted sm">{historial.length} registros</div></div>
+          <div className="scroll">
+            <table><thead><tr><th>Fecha</th><th>Hora</th><th>En malla</th><th>Conectados</th><th>Presentes</th><th>No conectados</th>{isAdmin && <th></th>}</tr></thead>
+              <tbody>{historial.map(h => (
+                <Fragment key={h.id}>
+                <tr style={{ cursor: 'pointer' }} onClick={() => setAbierto(abierto === h.id ? null : h.id)}>
+                  <td className="tabular muted">{abierto === h.id ? '▾ ' : '▸ '}{h.fecha}</td><td className="tabular">{h.hora || '—'}</td>
+                  <td className="tabular">{h.n_malla}</td><td className="tabular">{h.n_conectados}</td>
+                  <td className="tabular" style={{ color: 'var(--emerald)' }}>{h.n_presentes}</td>
+                  <td><span className={'pill ' + ((h.n_malla - h.n_presentes) > 0 ? 'rose' : 'green')}>{h.n_malla - h.n_presentes}</span></td>
+                  {isAdmin && <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={(e) => { e.stopPropagation(); borrarCorte(h.id) }}>Eliminar</button></td>}
+                </tr>
+                {abierto === h.id && (
+                  <tr><td colSpan={isAdmin ? 7 : 6} style={{ background: '#f8fafc' }}>
+                    <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', padding: '6px 0' }}>
+                      <ListaCorte titulo="✓ Presentes" color="green" items={h.presentes || []} />
+                      <ListaCorte titulo="✗ No conectados" color="rose" items={h.faltan || []} />
+                      <ListaCorte titulo="Conectados de más" color="amber" items={h.demas || []} />
+                    </div>
+                  </td></tr>
+                )}
+                </Fragment>
+              ))}</tbody></table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+function ListaCorte({ titulo, color, items }) {
+  return (
+    <div className="card" style={{ margin: 0 }}>
+      <div className="cardh"><b>{titulo}</b><span className={'pill ' + color}>{items.length}</span></div>
+      {items.length === 0 ? <div className="muted sm">—</div>
+        : <div style={{ maxHeight: 300, overflow: 'auto' }}>{items.map((n, i) => <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid #f1f5f9', fontSize: 13 }}>{n}</div>)}</div>}
+    </div>
+  )
+}
