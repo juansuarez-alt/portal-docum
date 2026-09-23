@@ -1,0 +1,67 @@
+name: Ingreso diario · Multimarca
+
+on:
+  schedule:
+    # Cada 2 horas (hora Colombia = UTC-5). Recalcula hoy y los 2 días anteriores.
+    - cron: "10 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      marca:
+        description: "Marca de marcas.json (vacío = todas). Ej: BALU"
+        required: false
+      date:
+        description: "Día puntual YYYY-MM-DD (opcional)"
+        required: false
+      backfill_from:
+        description: "Backfill desde YYYY-MM-DD (opcional)"
+        required: false
+      backfill_to:
+        description: "Backfill hasta YYYY-MM-DD (opcional)"
+        required: false
+      grupos:
+        description: "Solo mostrar la clasificación de grupos por frente"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ingreso-marcas
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Sincronizar ingreso multimarca
+        env:
+          ZENDESK_SUBDOMAIN: ${{ secrets.ZENDESK_SUBDOMAIN }}
+          ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
+          ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          IN_MARCA: ${{ github.event.inputs.marca }}
+          IN_DATE: ${{ github.event.inputs.date }}
+          IN_FROM: ${{ github.event.inputs.backfill_from }}
+          IN_TO: ${{ github.event.inputs.backfill_to }}
+          IN_GRUPOS: ${{ github.event.inputs.grupos }}
+        run: |
+          ARGS=""
+          [ -n "$IN_MARCA" ] && ARGS="$ARGS --marca $IN_MARCA"
+          if [ "$IN_GRUPOS" = "true" ]; then
+            python scripts/sync_ingreso_marcas.py $ARGS --grupos
+          elif [ -n "$IN_FROM" ]; then
+            python scripts/sync_ingreso_marcas.py $ARGS --backfill "$IN_FROM" "${IN_TO:-$IN_FROM}"
+          elif [ -n "$IN_DATE" ]; then
+            python scripts/sync_ingreso_marcas.py $ARGS --date "$IN_DATE"
+          else
+            python scripts/sync_ingreso_marcas.py $ARGS
+          fi
