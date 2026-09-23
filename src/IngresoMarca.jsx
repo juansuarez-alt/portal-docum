@@ -18,6 +18,8 @@ const FRENTE_COLOR = {
   'Atención': '#22d3ee', 'Gestión': '#818cf8', 'N2': '#f59e0b', 'N3': '#f472b6',
   'Otros grupos': '#64748b', 'Sin grupo': '#334155',
 }
+const FRENTE_LABEL = { 'Sin grupo': 'Solo IA / sin asignar', 'Otros grupos': 'Otros grupos' }
+const etq = n => FRENTE_LABEL[n] || n
 const EXTRA_COLORS = ['#a3e635', '#fb923c', '#38bdf8', '#e879f9']
 const PICO = '#ef4444'
 const meses = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
@@ -201,15 +203,23 @@ function Tablero({ rows, gran, frente, setFrente }) {
         <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '4px 14px' }}>
           <span style={{ fontSize: 44, fontWeight: 700, letterSpacing: '-0.03em', color: frente ? frentes.color[frente] : '#5eead4', lineHeight: 1 }}>{nf.format(sel)}</span>
           <span style={{ color: '#8aa0b6', fontSize: 14 }}>
-            {frente ? `tickets en ${frente} · ${fpct(pct(sel, total))} de ${nf.format(total)}` : `tickets de todos los frentes · ${rows.length} días`}
+            {frente ? `tickets en ${etq(frente)} · ${fpct(pct(sel, total))} de ${nf.format(total)}` : `tickets de todos los frentes · ${rows.length} días`}
           </span>
           {frente && <button onClick={() => setFrente(null)} style={{ ...btnSec, marginLeft: 'auto' }}>Ver todos los frentes</button>}
         </div>
         <div style={{ display: 'flex', height: 26, borderRadius: 6, overflow: 'hidden', margin: '16px 0 12px', background: '#16223a' }}>
           {frentes.nombres.map(n => (
-            <button key={n} title={`${n}: ${nf.format(frentes.tot[n])}`} aria-label={`Filtrar ${n}`} onClick={() => setFrente(f => (f === n ? null : n))}
+            <button key={n} title={`${etq(n)}: ${nf.format(frentes.tot[n])}`} aria-label={`Filtrar ${etq(n)}`} onClick={() => setFrente(f => (f === n ? null : n))}
               style={{ flex: frentes.tot[n] || 0.0001, minWidth: 3, border: 'none', padding: 0, cursor: 'pointer', background: frentes.color[n], opacity: frente && frente !== n ? 0.25 : 1 }} />
           ))}
+        </div>
+        {/* Participación de la IA en el ingreso */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 22px', alignItems: 'baseline', padding: '10px 12px', margin: '0 0 12px', borderRadius: 10, background: '#0b1420', border: '1px solid #1e2b3c', fontSize: 13.5, color: '#a8b3d9' }}>
+          <span style={{ color: '#2dd4bf', fontWeight: 600 }}>Agente IA</span>
+          <span>Atendió <b style={{ color: '#e6edf3' }}>{nf.format(iaU)}</b> ({fpct(pct(iaU, total))} del ingreso)</span>
+          <span>Resolvió <b style={{ color: '#e6edf3' }}>{nf.format(iaR)}</b> sin pasar a un asesor</span>
+          <span>Pasaron a asesor o quedaron sin resolver <b style={{ color: '#e6edf3' }}>{nf.format(iaU - iaR)}</b></span>
+          <span>Absorción <b style={{ color: '#4ade80' }}>{iaU ? fpct(pct(iaR, iaU)) : '—'}</b></span>
         </div>
         {/* 2 · Por frente */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 }}>
@@ -217,7 +227,7 @@ function Tablero({ rows, gran, frente, setFrente }) {
             <button key={n} onClick={() => setFrente(f => (f === n ? null : n))}
               style={{ textAlign: 'left', cursor: 'pointer', borderRadius: 10, padding: '10px 12px', background: frente === n ? '#16223a' : 'transparent', border: `1px solid ${frente === n ? frentes.color[n] : '#1e2b3c'}`, color: '#e6edf3' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#8aa0b6' }}>
-                <span style={{ width: 9, height: 9, borderRadius: 2, background: frentes.color[n] }} />{n}
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: frentes.color[n] }} />{etq(n)}
               </div>
               <div style={{ fontSize: 22, fontWeight: 600, marginTop: 4 }}>{nf.format(frentes.tot[n])}</div>
               <div style={{ fontSize: 12, color: '#64748b' }}>{fpct(pct(frentes.tot[n], total))} del ingreso</div>
@@ -233,7 +243,7 @@ function Tablero({ rows, gran, frente, setFrente }) {
           series={frente ? [frente] : frentes.nombres} color={frentes.color}
           pico={p => gran === 'dia' && frente && picos.esPico.has(p.key)}
           valorDe={(p, s) => p.fr[s] || 0} />
-        {!frente && <Legend items={frentes.nombres.map(n => [frentes.color[n], n])} />}
+        {!frente && <Legend items={frentes.nombres.map(n => [frentes.color[n], etq(n)])} />}
       </Panel>
 
       {/* 4 · Picos */}
@@ -297,7 +307,7 @@ function Tablero({ rows, gran, frente, setFrente }) {
           <Detalle periodos={periodos} frentes={frentes.nombres} gran={gran} esPico={picos.esPico} frente={frente} />
         </Panel>
       </div>
-      {actualizado && <div style={{ fontSize: 12, color: '#64748b', marginTop: 10 }}>Última sincronización: {new Date(actualizado).toLocaleString('es-CO', { timeZone: 'America/Bogota' })}. El sync corre cada 2 horas y recalcula los últimos 3 días.</div>}
+      {actualizado && <div style={{ fontSize: 12, color: '#64748b', marginTop: 10 }}>Última sincronización: {new Date(actualizado).toLocaleString('es-CO', { timeZone: 'America/Bogota' })}. El sync corre cada 2 horas y recalcula los últimos 7 días.</div>}
     </>
   )
 }
@@ -363,7 +373,7 @@ function Tendencia({ puntos }) {
 }
 
 function Detalle({ periodos, frentes, gran, esPico, frente }) {
-  const cols = ['Periodo', 'Total', ...frentes, 'Atendidos IA', 'Resueltos IA', 'No resueltos IA', '% absorción', 'Esc. N2', 'Esc. N3']
+  const cols = ['Periodo', 'Total', ...frentes.map(etq), 'Atendidos IA', 'Resueltos IA', 'No resueltos IA', '% absorción', 'Esc. N2', 'Esc. N3']
   const fila = p => [p.label, p.total, ...frentes.map(f => p.fr[f] || 0), p.iaU, p.iaR, p.iaU - p.iaR, pct(p.iaR, p.iaU), p.n2, p.n3]
   function csv() {
     const txt = [cols.join(';'), ...periodos.map(p => fila(p).map((v, i) => (i === 0 ? p.key : i === cols.indexOf('% absorción') ? String(Math.round(v * 10) / 10).replace('.', ',') : v)).join(';'))].join('\n')
