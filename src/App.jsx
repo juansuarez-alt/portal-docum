@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, Fragment } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
-import IngresoDiario from './IngresoDiario.jsx'
+import IngresoMarca from './IngresoMarca.jsx'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
 /* ---------- constantes ---------- */
@@ -155,7 +155,7 @@ export default function App() {
         {tab === 'problemas' && <Problemas email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'zendesk' && <MallaOp email={email} isAdmin={actingAdmin} equipo={equipo} />}
-        {tab === 'ingreso' && <IngresoDiario />}
+        {tab === 'ingreso' && <IngresoMarca marca={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
