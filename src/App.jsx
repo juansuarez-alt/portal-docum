@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, Fragment } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase, DOMINIO, DOMINIOS } from './supabaseClient.js'
 import IngresoMarca from './IngresoMarca.jsx'
+import Satisfaccion from './Satisfaccion.jsx'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 
 /* ---------- constantes ---------- */
@@ -147,6 +148,7 @@ export default function App() {
         <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>Productividad</button>
         <button className={tab === 'zendesk' ? 'on' : ''} onClick={() => setTab('zendesk')}>Malla / Zendesk</button>
         <button className={tab === 'ingreso' ? 'on' : ''} onClick={() => setTab('ingreso')}>Ingreso diario</button>
+        <button className={tab === 'satisfaccion' ? 'on' : ''} onClick={() => setTab('satisfaccion')}>Satisfacción</button>
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Analistas</button>}
       </nav>
       <main className="wrap">
@@ -156,6 +158,7 @@ export default function App() {
         {tab === 'prod' && <Productividad email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'zendesk' && <MallaOp email={email} isAdmin={actingAdmin} equipo={equipo} />}
         {tab === 'ingreso' && <IngresoMarca marca={equipo} />}
+        {tab === 'satisfaccion' && <Satisfaccion marca={equipo} email={email} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
