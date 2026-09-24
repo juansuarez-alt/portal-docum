@@ -173,7 +173,7 @@ def dias_objetivo(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--marca")
+    ap.add_argument("--marca", help="Una o varias, separadas por coma. Ej: BALU, DOCUM")
     ap.add_argument("--date")
     ap.add_argument("--backfill", nargs=2, metavar=("DESDE", "HASTA"))
     ap.add_argument("--ultimos", type=int, default=10)
@@ -181,10 +181,18 @@ def main():
 
     marcas = cargar_marcas()
     if args.marca:
-        clave = args.marca.strip().upper()
-        if clave not in marcas:
-            sys.exit(f"La marca {clave} no está activa en Zendesk. Disponibles: {', '.join(marcas)}")
-        marcas = {clave: marcas[clave]}
+        pedidas = []
+        for trozo in args.marca.split(","):
+            trozo = clave_marca(trozo)
+            if not trozo:
+                continue
+            # "CRM AGORA" es una marca; "BALU DOCUM" son dos
+            pedidas += [trozo] if trozo in marcas else trozo.split()
+        faltan = [m for m in pedidas if m not in marcas]
+        if faltan:
+            sys.exit(f"No encontré {', '.join(faltan)} entre las marcas activas de Zendesk. "
+                     f"Disponibles: {', '.join(marcas)}. Separa varias con coma, ej: BALU, DOCUM")
+        marcas = {m: marcas[m] for m in dict.fromkeys(pedidas)}
 
     grupos = grupos_zendesk()
     dias = dias_objetivo(args)
