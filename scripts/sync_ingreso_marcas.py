@@ -25,7 +25,7 @@ import requests
 
 BOGOTA = ZoneInfo("America/Bogota")
 DOW_ES = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
-OTROS, SIN = "Otros grupos", "Sin grupo"
+NIVEL_IA, SUB_IA = "IA", "Solo IA / sin asignar"
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "marcas.json")
 
 
@@ -99,21 +99,24 @@ def tickets_del_dia(brand_id, dia):
 
 
 # ─────────────────────────── clasificación ───────────────────────────
-def mapa_frentes(marca_cfg, grupos):
-    """group_id -> nombre de frente, según los patrones/IDs de la marca."""
-    reglas = [(f["nombre"], re.compile(f.get("patron") or "(?!x)x", re.I), set(map(int, f.get("grupos", []))))
-              for f in marca_cfg["frentes"]]
+def mapa_grupos(marca_cfg, grupos):
+    """group_id -> (nivel, subgrupo). Nivel por patrón/ID; subgrupo = nombre del grupo sin prefijo."""
+    reglas = [(n["nivel"], re.compile(n.get("patron") or "(?!x)x", re.I), set(map(int, n.get("grupos", []))))
+              for n in marca_cfg["niveles"]]
+    defecto = marca_cfg.get("nivel_por_defecto", "N1")
+    prefijo = re.compile(marca_cfg.get("quitar_prefijo") or "(?!x)x", re.I)
+    unir = marca_cfg.get("unir", {})
     out = {}
     for gid, nombre in grupos.items():
-        frente = next((n for n, _, ids in reglas if gid in ids), None)
-        if not frente:
-            frente = next((n for n, rx, _ in reglas if rx.search(limpio(nombre))), OTROS)
-        out[gid] = frente
+        nivel = next((n for n, _, ids in reglas if gid in ids), None) \
+            or next((n for n, rx, _ in reglas if rx.search(limpio(nombre))), defecto)
+        sub = prefijo.sub("", nombre).strip() or nombre
+        out[gid] = (nivel, unir.get(sub, unir.get(nombre, sub)))
     return out
 
 
-def agregar(tickets, dia, marca, marca_cfg, frente_de, ia):
-    frentes = defaultdict(int)
+def agregar(tickets, dia, marca, marca_cfg, grupo_de, ia):
+    niveles = defaultdict(lambda: defaultdict(int))
     horas = [0] * 24
     total = ia_u = ia_r = n2 = n3 = 0
     esc = marca_cfg.get("escalamiento", {})
@@ -127,8 +130,11 @@ def agregar(tickets, dia, marca, marca_cfg, frente_de, ia):
         horas[creado.hour] += 1
 
         gid = t.get("group_id")
-        frente = frente_de.get(gid, OTROS) if gid else SIN
-        frentes[frente] += 1
+        if gid:
+            nivel, sub = grupo_de.get(gid, (marca_cfg.get("nivel_por_defecto", "N1"), f"Grupo {gid}"))
+        else:
+            nivel, sub = NIVEL_IA, SUB_IA
+        niveles[nivel][sub] += 1
 
         tags = t.get("tags") or []
         canal = (t.get("via") or {}).get("channel")
@@ -139,14 +145,14 @@ def agregar(tickets, dia, marca, marca_cfg, frente_de, ia):
             ia_u += 1
             ia_r += 1 if resuelto_ia else 0
 
-        if frente == e2.get("frente") or any(x in tags for x in e2.get("etiquetas", [])):
+        if nivel == e2.get("nivel") or any(x in tags for x in e2.get("etiquetas", [])):
             n2 += 1
-        if frente == e3.get("frente") or any(x in tags for x in e3.get("etiquetas", [])):
+        if nivel == e3.get("nivel") or any(x in tags for x in e3.get("etiquetas", [])):
             n3 += 1
 
     return {
         "marca": marca, "dia": dia, "dow": DOW_ES[dt.date.fromisoformat(dia).weekday()],
-        "total": total, "frentes": dict(frentes),
+        "total": total, "frentes": {n: dict(s) for n, s in niveles.items()},
         "ia_universo": ia_u, "ia_resueltos": ia_r,
         "esc_n2": n2, "esc_n3": n3, "horas": horas,
         "actualizado": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -202,24 +208,26 @@ def main():
 
     if args.grupos:
         for m, mc in marcas.items():
-            fr = mapa_frentes(mc, grupos)
-            print(f"\n== {m} ==")
-            for gid, nombre in sorted(grupos.items(), key=lambda x: (fr[x[0]], x[1])):
-                print(f"  {fr[gid]:<14} | {gid} | {nombre}")
+            gm = mapa_grupos(mc, grupos)
+            print(f"\n== {m} ==  (NIVEL | SUBGRUPO | ID | NOMBRE EN ZENDESK)")
+            for gid, nombre in sorted(grupos.items(), key=lambda x: (gm[x[0]], x[1])):
+                print(f"  {gm[gid][0]:<4} | {gm[gid][1]:<28} | {gid} | {nombre}")
         return
 
     dias = dias_objetivo(args)
     print(f"Días: {dias[0]} → {dias[-1]} ({len(dias)})  Marcas: {', '.join(marcas)}")
 
     for m, mc in marcas.items():
-        frente_de = mapa_frentes(mc, grupos)
+        grupo_de = mapa_grupos(mc, grupos)
         filas = []
         for d in dias:
             tk = tickets_del_dia(mc["brand_id"], d)
-            f = agregar(tk, d, m, mc, frente_de, ia)
+            f = agregar(tk, d, m, mc, grupo_de, ia)
             filas.append(f)
             print(f"  {m} {d} ({f['dow']}): total={f['total']} ia={f['ia_resueltos']}/{f['ia_universo']} "
-                  f"n2={f['esc_n2']} n3={f['esc_n3']} frentes={f['frentes']}")
+                  f"n2={f['esc_n2']} n3={f['esc_n3']}")
+            for nv, subs in sorted(f["frentes"].items()):
+                print(f"      {nv}: " + ", ".join(f"{k}={v}" for k, v in sorted(subs.items(), key=lambda x: -x[1])))
             if len(filas) >= 15:          # sube por lotes en backfills largos
                 upsert(filas); filas = []
         upsert(filas)
