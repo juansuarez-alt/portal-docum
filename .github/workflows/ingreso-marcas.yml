@@ -63,5 +63,5 @@ jobs:
           elif [ -n "$IN_DATE" ]; then
             python scripts/sync_ingreso_marcas.py $ARGS --date "$IN_DATE"
           else
-            python scripts/sync_ingreso_marcas.py $ARGS
+            python scripts/sync_ingreso_marcas.py $ARGS --ultimo 7 
           fi
