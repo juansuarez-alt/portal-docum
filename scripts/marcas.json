@@ -1,33 +1,74 @@
 {
-  "_ayuda": "Una entrada por marca. La clave debe coincidir con el equipo del selector del portal (sin importar mayúsculas ni tildes). Los frentes se asignan por el nombre del grupo actual del ticket: gana el primero cuyo patrón coincida, en el orden de la lista. Grupos que no coinciden quedan en 'Otros grupos'; tickets sin grupo, en 'Sin grupo'. Para forzar un grupo, pon su ID en 'grupos'.",
-
+  "_ayuda": "Una entrada por marca; la clave debe coincidir con el equipo del selector del portal (sin importar mayúsculas ni tildes). Cada ticket se ubica por su GRUPO ACTUAL: si el nombre del grupo coincide con el patrón de N3 o N2 (o su ID está en 'grupos'), va a ese nivel; cualquier otro grupo va a 'nivel_por_defecto' (N1). Los tickets sin grupo van a 'Solo IA / sin asignar'. El subgrupo es el nombre del grupo en Zendesk sin el prefijo de 'quitar_prefijo'. Con 'unir' puedes renombrar o juntar subgrupos, ej: {\"Correo VIP\": \"VIP\", \"Canales VIP\": \"VIP\"}.",
   "_ia": {
     "campo_tipo_resolucion": 43116733797147,
     "valor_automatizado": "zd_automated_resolution",
-    "canales": ["native_messaging"]
+    "canales": [
+      "native_messaging"
+    ]
   },
-
   "BALU": {
     "brand_id": 38314807027099,
-    "frentes": [
-      { "nombre": "N3",       "patron": "(^|[^a-z0-9])n3([^a-z0-9]|$)", "grupos": [] },
-      { "nombre": "N2",       "patron": "(^|[^a-z0-9])n2([^a-z0-9]|$)|soporte", "grupos": [] },
-      { "nombre": "Gestión",  "patron": "gestion", "grupos": [] },
-      { "nombre": "Atención", "patron": "atencion|(^|[^a-z0-9])n1([^a-z0-9]|$)", "grupos": [] }
+    "niveles": [
+      {
+        "nivel": "N3",
+        "patron": "(^|[^a-z0-9])n3([^a-z0-9]|$)",
+        "grupos": []
+      },
+      {
+        "nivel": "N2",
+        "patron": "(^|[^a-z0-9])n2([^a-z0-9]|$)",
+        "grupos": []
+      }
     ],
-    "escalamiento": { "n2": { "frente": "N2", "etiquetas": ["escalado_n2"] },
-                      "n3": { "frente": "N3", "etiquetas": ["escalado_n3"] } }
+    "nivel_por_defecto": "N1",
+    "quitar_prefijo": "^\\s*(n[123]|bal[uú]|docum)\\s*[-–:·|]*\\s*",
+    "unir": {},
+    "escalamiento": {
+      "n2": {
+        "nivel": "N2",
+        "etiquetas": [
+          "escalado_n2"
+        ]
+      },
+      "n3": {
+        "nivel": "N3",
+        "etiquetas": [
+          "escalado_n3"
+        ]
+      }
+    }
   },
-
   "DOCUM": {
     "brand_id": 47948014325787,
-    "frentes": [
-      { "nombre": "N3",       "patron": "(^|[^a-z0-9])n3([^a-z0-9]|$)", "grupos": [] },
-      { "nombre": "N2",       "patron": "(^|[^a-z0-9])n2([^a-z0-9]|$)|soporte", "grupos": [] },
-      { "nombre": "Gestión",  "patron": "gestion", "grupos": [] },
-      { "nombre": "Atención", "patron": "atencion|(^|[^a-z0-9])n1([^a-z0-9]|$)", "grupos": [] }
+    "niveles": [
+      {
+        "nivel": "N3",
+        "patron": "(^|[^a-z0-9])n3([^a-z0-9]|$)",
+        "grupos": []
+      },
+      {
+        "nivel": "N2",
+        "patron": "(^|[^a-z0-9])n2([^a-z0-9]|$)",
+        "grupos": []
+      }
     ],
-    "escalamiento": { "n2": { "frente": "N2", "etiquetas": ["escalado_n2"] },
-                      "n3": { "frente": "N3", "etiquetas": ["escalado_n3"] } }
+    "nivel_por_defecto": "N1",
+    "quitar_prefijo": "^\\s*(n[123]|bal[uú]|docum)\\s*[-–:·|]*\\s*",
+    "unir": {},
+    "escalamiento": {
+      "n2": {
+        "nivel": "N2",
+        "etiquetas": [
+          "escalado_n2"
+        ]
+      },
+      "n3": {
+        "nivel": "N3",
+        "etiquetas": [
+          "escalado_n3"
+        ]
+      }
+    }
   }
 }
