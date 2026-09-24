@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       marca:
-        description: "Marca de marcas.json (vacío = todas). Ej: BALU"
+        description: "Marca sin tildes, como está en Zendesk (vacío = todas). Ej: BALU, DOCUM, FISCALIA"
         required: false
       date:
         description: "Día puntual YYYY-MM-DD (opcional)"
