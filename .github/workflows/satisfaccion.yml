@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       marca:
-        description: "Marca sin tildes, como está en Zendesk (vacío = todas). Ej: BALU, DOCUM, FISCALIA"
+        description: "Marca sin tildes, como está en Zendesk (vacío = todas). Varias con coma: BALU, DOCUM"
         required: false
       date:
         description: "Día puntual YYYY-MM-DD (opcional)"
@@ -50,12 +50,12 @@ jobs:
           IN_FROM: ${{ github.event.inputs.backfill_from }}
           IN_TO: ${{ github.event.inputs.backfill_to }}
         run: |
-          ARGS=""
-          [ -n "$IN_MARCA" ] && ARGS="$ARGS --marca $IN_MARCA"
+          ARGS=()
+          [ -n "$IN_MARCA" ] && ARGS+=(--marca "$IN_MARCA")
           if [ -n "$IN_FROM" ]; then
-            python scripts/sync_satisfaccion.py $ARGS --backfill "$IN_FROM" "${IN_TO:-$IN_FROM}"
+            python scripts/sync_satisfaccion.py "${ARGS[@]}" --backfill "$IN_FROM" "${IN_TO:-$IN_FROM}"
           elif [ -n "$IN_DATE" ]; then
-            python scripts/sync_satisfaccion.py $ARGS --date "$IN_DATE"
+            python scripts/sync_satisfaccion.py "${ARGS[@]}" --date "$IN_DATE"
           else
-            python scripts/sync_satisfaccion.py $ARGS --ultimos 10
+            python scripts/sync_satisfaccion.py "${ARGS[@]}" --ultimos 10
           fi
