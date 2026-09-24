@@ -27,7 +27,19 @@ const lunes = s => { const d = parse(s); d.setDate(d.getDate() - ((d.getDay() + 
 const corto = s => { const d = parse(s); return `${d.getDate()} ${meses[d.getMonth()]}` }
 const nomMes = k => { const [y, m] = k.split('-'); return `${meses[+m - 1]} ${y}` }
 const colorCsat = x => (x == null ? '#64748b' : x >= 90 ? '#4ade80' : x >= 80 ? '#facc15' : '#f87171')
-const nomMarca = m => (m === 'GLOBAL' ? 'Toda la mesa' : m === 'BALU' ? 'Balú' : m.charAt(0) + m.slice(1).toLowerCase())
+const NOMBRES = { GLOBAL: 'Toda la mesa', BALU: 'Balú', DOCUM: 'DOCUM', FISCALIA: 'Fiscalía', UGPP: 'UGPP', 'CRM AGORA': 'CRM Ágora' }
+const nomMarca = m => NOMBRES[m] || m.toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase())
+
+/* Puntaje = CSAT ajustado por volumen (límite inferior de Wilson al 95%).
+   Con pocas calificaciones el resultado es menos confiable y el puntaje baja:
+   10 de 10 buenas → 72,2 · 50 de 50 → 92,9 · 144 de 145 → 96,2 */
+function puntaje(b, n) {
+  if (!n) return null
+  const z = 1.96, p = b / n, z2 = z * z
+  return (100 * (p + z2 / (2 * n) - z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n))) / (1 + z2 / n)
+}
+const fnum = x => (x == null ? '—' : (Math.round(x * 10) / 10).toLocaleString('es-CO'))
+const ORDENES = { puntaje: 'Puntaje', csat: 'CSAT', t: 'Tickets resueltos', resp: 'Calificadas', tasa: 'Tasa de respuesta' }
 
 function presets() {
   const h = hoyBog(), d = parse(h)
@@ -46,7 +58,8 @@ export default function Satisfaccion({ marca, email }) {
   const [[desde, hasta], setRango] = useState(presets().mes)
   const [alcance, setAlcance] = useState('GLOBAL')
   const [gran, setGran] = useState('dia')
-  const [minEnc, setMinEnc] = useState(10)
+  const [minEnc, setMinEnc] = useState(5)
+  const [orden, setOrden] = useState('puntaje')
   const [rows, setRows] = useState([])
   const [estado, setEstado] = useState('loading')
 
@@ -81,13 +94,16 @@ export default function Satisfaccion({ marca, email }) {
       {estado === 'loading' && <Msg>Cargando satisfacción…</Msg>}
       {estado === 'error' && <Msg tone="#f87171">No se pudo leer la tabla satisfaccion_diaria. Revisa que exista en Supabase y que tu sesión siga activa.</Msg>}
       {estado === 'empty' && <Msg>No hay encuestas entre {corto(desde)} y {corto(hasta)}. Corre un backfill en GitHub Actions → "Satisfacción · Multimarca".</Msg>}
-      {estado === 'ready' && <Tablero {...{ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, email, marcaSel: claveMarca(marca) }} />}
+      {estado === 'ready' && <Tablero {...{ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, orden, setOrden, email }} />}
     </div>
   )
 }
 
-function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, email }) {
-  const marcas = useMemo(() => [...new Set(rows.map(r => r.marca))].sort(), [rows])
+function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, orden, setOrden, email }) {
+  const marcas = useMemo(() => {
+    const v = {}; rows.forEach(r => (v[r.marca] = (v[r.marca] || 0) + r.buenas + r.malas + r.ofrecidas))
+    return Object.keys(v).sort((a, b) => v[b] - v[a] || a.localeCompare(b))
+  }, [rows])
   const colorDe = m => COLORES[m] || EXTRA[marcas.indexOf(m) % EXTRA.length]
 
   /* Totales por marca y global */
@@ -106,17 +122,21 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
   const ranking = useMemo(() => {
     const map = {}
     filas.forEach(r => Object.entries(r.analistas || {}).forEach(([id, a]) => {
-      const x = (map[id] ||= { id, n: a.n, e: a.e, b: 0, m: 0, o: 0, marcas: new Set() })
+      const x = (map[id] ||= { id, n: a.n, e: a.e, t: 0, b: 0, m: 0, o: 0, marcas: new Set() })
       x.b += a.b || 0; x.m += a.m || 0; x.o += a.o || 0; x.marcas.add(r.marca)
+      x.t += a.t ?? ((a.b || 0) + (a.m || 0) + (a.o || 0))   // filas viejas sin 't'
       if (a.n) x.n = a.n; if (a.e) x.e = a.e
     }))
-    const todos = Object.values(map).map(a => ({ ...a, resp: a.b + a.m, csat: pct(a.b, a.b + a.m), tasa: pct(a.b + a.m, a.b + a.m + a.o), marcas: [...a.marcas].sort() }))
+    const todos = Object.values(map).map(a => ({ ...a, env: a.b + a.m + a.o, resp: a.b + a.m, csat: pct(a.b, a.b + a.m), tasa: pct(a.b + a.m, a.b + a.m + a.o), puntaje: puntaje(a.b, a.b + a.m), marcas: [...a.marcas].sort() }))
     const ia = todos.find(a => a.id === SIN_ASIGNAR)
     const personas = todos.filter(a => a.id !== SIN_ASIGNAR)
-    const califican = personas.filter(a => a.resp >= minEnc).sort((x, y) => y.csat - x.csat || y.resp - x.resp)
+    const porPuntaje = (x, y) => y.puntaje - x.puntaje || y.t - x.t
+    const califican = personas.filter(a => a.resp >= minEnc).sort(porPuntaje)
+    const podio = califican.slice(0, 3)
+    const tabla = orden === 'puntaje' ? califican : [...califican].sort((x, y) => (y[orden] ?? -1) - (x[orden] ?? -1) || porPuntaje(x, y))
     const pocos = personas.filter(a => a.resp < minEnc && a.resp > 0).sort((x, y) => y.resp - x.resp)
-    return { califican, pocos, ia }
-  }, [filas, minEnc])
+    return { califican, tabla, podio, pocos, ia }
+  }, [filas, minEnc, orden])
 
   /* CSAT por grupo */
   const porGrupo = useMemo(() => {
@@ -146,12 +166,13 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
   }))).sort((a, b) => (a.dia < b.dia ? 1 : -1)), [filas])
 
   const actualizado = rows.reduce((a, r) => (r.actualizado > a ? r.actualizado : a), '')
-  const podio = ranking.califican.slice(0, 3)
+  const podio = ranking.podio
   const yo = String(email || '').toLowerCase()
 
   function csvRanking() {
-    const cab = ['Posición', 'Analista', 'Correo', 'Marcas', 'CSAT %', 'Buenas', 'Malas', 'Respondidas', 'Sin respuesta', 'Tasa de respuesta %']
-    const lin = ranking.califican.map((a, i) => [i + 1, a.n, a.e, a.marcas.join(' + '), (Math.round(a.csat * 10) / 10).toString().replace('.', ','), a.b, a.m, a.resp, a.o, a.tasa == null ? '' : (Math.round(a.tasa * 10) / 10).toString().replace('.', ',')].join(';'))
+    const d = x => (x == null ? '' : (Math.round(x * 10) / 10).toString().replace('.', ','))
+    const cab = ['Posición', 'Analista', 'Correo', 'Marcas', 'Tickets resueltos', 'Encuestas enviadas', 'Calificadas', 'Sin respuesta', 'Tasa de respuesta %', 'Buenas', 'Malas', 'CSAT %', 'Puntaje']
+    const lin = ranking.tabla.map((a, i) => [i + 1, a.n, a.e, a.marcas.map(nomMarca).join(' + '), a.t, a.env, a.resp, a.o, d(a.tasa), a.b, a.m, d(a.csat), d(a.puntaje)].join(';'))
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob(['\ufeff' + [cab.join(';'), ...lin].join('\n')], { type: 'text/csv;charset=utf-8' }))
     a.download = `satisfaccion_analistas_${alcance}_${rows[0]?.dia}_${rows[rows.length - 1]?.dia}.csv`
@@ -160,6 +181,12 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
 
   return (
     <>
+      {/* 0 · Filtro de marca */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginBottom: 12 }}>
+        <span style={{ fontSize: 12.5, color: '#64748b', marginRight: 4 }}>Marca:</span>
+        {['GLOBAL', ...marcas].map(m => <Pill key={m} active={alcance === m} onClick={() => setAlcance(m)}>{nomMarca(m)}</Pill>)}
+      </div>
+
       {/* 1 · Tarjetas global y por marca (clic = cambiar alcance) */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, marginBottom: 12 }}>
         {['GLOBAL', ...marcas].map(m => {
@@ -175,7 +202,7 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
                 <b style={{ color: '#4ade80' }}>{nf.format(t.b)}</b> buenas · <b style={{ color: '#f87171' }}>{nf.format(t.m)}</b> malas
               </div>
               <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
-                Respondieron {fpct(pct(t.b + t.m, t.b + t.m + t.o))} de {nf.format(t.b + t.m + t.o)} encuestas
+                {nf.format(t.b + t.m)} calificadas de {nf.format(t.b + t.m + t.o)} enviadas ({fpct(pct(t.b + t.m, t.b + t.m + t.o))}) · {nf.format(t.res)} tickets
               </div>
             </button>
           )
@@ -184,11 +211,17 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
 
       {/* 2 · Mejores analistas */}
       <Panel title={`Mejores analistas · ${nomMarca(alcance)}`}
-        subtitle={`Ordenados por CSAT; en empate, por más encuestas respondidas. Solo entran quienes tienen al menos ${minEnc} encuestas respondidas.`}
-        extra={<label style={{ fontSize: 12, color: '#8aa0b6', display: 'flex', alignItems: 'center', gap: 6 }}>Mínimo
-          <input type="number" min={1} value={minEnc} onChange={e => setMinEnc(Math.max(1, +e.target.value || 1))}
-            style={{ width: 64, background: '#0b1420', color: '#e6edf3', border: '1px solid #1e2b3c', borderRadius: 6, padding: '4px 6px' }} /></label>}>
-        {podio.length === 0 ? <Msg>Ningún analista llega al mínimo de {minEnc} encuestas en este rango. Baja el mínimo o amplía las fechas.</Msg> : (
+        subtitle={<>El top sale del <b style={{ color: '#cbd5e1' }}>puntaje</b>: el CSAT ajustado por cuántas calificaciones tiene el analista. 10 de 10 buenas da 72,2; 50 de 50 da 92,9. Así pesa más quien sostiene su CSAT con más volumen. En empate gana quien resolvió más tickets.</>}
+        extra={<div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 12, color: '#8aa0b6', display: 'flex', alignItems: 'center', gap: 6 }}>Ordenar tabla por
+            <select value={orden} onChange={e => setOrden(e.target.value)} style={{ width: 'auto', background: '#0b1420', color: '#e6edf3', border: '1px solid #1e2b3c', borderRadius: 6, padding: '4px 6px', fontSize: 12.5 }}>
+              {Object.entries(ORDENES).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select></label>
+          <label style={{ fontSize: 12, color: '#8aa0b6', display: 'flex', alignItems: 'center', gap: 6 }}>Mínimo de calificadas
+            <input type="number" min={1} value={minEnc} onChange={e => setMinEnc(Math.max(1, +e.target.value || 1))}
+              style={{ width: 60, background: '#0b1420', color: '#e6edf3', border: '1px solid #1e2b3c', borderRadius: 6, padding: '4px 6px' }} /></label>
+        </div>}>
+        {podio.length === 0 ? <Msg>Ningún analista de {nomMarca(alcance)} llega al mínimo de {minEnc} calificaciones en este rango. Baja el mínimo o amplía las fechas.</Msg> : (
           <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 8, marginBottom: 14 }}>
               {podio.map((a, i) => (
@@ -196,24 +229,29 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
                   <div style={{ fontSize: 12, color: i === 0 ? '#facc15' : '#8aa0b6', fontWeight: 600 }}>{['1.º lugar', '2.º lugar', '3.º lugar'][i]}</div>
                   <div style={{ fontSize: 15, fontWeight: 600, marginTop: 2 }}>{a.n}</div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
-                    <span style={{ fontSize: 26, fontWeight: 700, color: colorCsat(a.csat) }}>{fpct(a.csat)}</span>
-                    <span style={{ fontSize: 12, color: '#64748b' }}>{nf.format(a.resp)} encuestas</span>
+                    <span style={{ fontSize: 26, fontWeight: 700, color: colorCsat(a.puntaje) }}>{fnum(a.puntaje)}</span>
+                    <span style={{ fontSize: 12, color: '#64748b' }}>puntaje · CSAT {fpct(a.csat)}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#a8b3d9', marginTop: 2 }}>
+                    {nf.format(a.t)} tickets · {nf.format(a.resp)} calificadas de {nf.format(a.env)} enviadas · {nf.format(a.m)} malas
                   </div>
                   {alcance === 'GLOBAL' && <div style={{ fontSize: 11.5, color: '#64748b' }}>{a.marcas.map(nomMarca).join(' + ')}</div>}
                 </div>
               ))}
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}><button onClick={csvRanking} style={btnSec}>Descargar CSV</button></div>
-            <Tabla cols={['#', 'Analista', ...(alcance === 'GLOBAL' ? ['Marcas'] : []), 'CSAT', 'Buenas', 'Malas', 'Respondidas', 'Tasa de respuesta']}>
-              {ranking.califican.map((a, i) => {
+            <Tabla cols={['#', 'Analista', ...(alcance === 'GLOBAL' ? ['Marcas'] : []), 'Tickets', 'Enviadas', 'Calificadas', 'Sin respuesta', 'Tasa resp.', 'Buenas', 'Malas', 'CSAT', 'Puntaje']}>
+              {ranking.tabla.map((a, i) => {
                 const mio = yo && a.e === yo
                 return (
                   <tr key={a.id} style={{ background: mio ? '#16223a' : 'transparent' }}>
                     <Td l>{i + 1}</Td>
                     <Td l>{a.n}{mio && <span style={{ marginLeft: 6, fontSize: 11, color: '#5eead4' }}>tú</span>}</Td>
                     {alcance === 'GLOBAL' && <Td l>{a.marcas.map(nomMarca).join(' + ')}</Td>}
-                    <Td><b style={{ color: colorCsat(a.csat) }}>{fpct(a.csat)}</b></Td>
-                    <Td>{nf.format(a.b)}</Td><Td>{nf.format(a.m)}</Td><Td>{nf.format(a.resp)}</Td><Td>{fpct(a.tasa)}</Td>
+                    <Td>{nf.format(a.t)}</Td><Td>{nf.format(a.env)}</Td><Td>{nf.format(a.resp)}</Td><Td>{nf.format(a.o)}</Td><Td>{fpct(a.tasa)}</Td>
+                    <Td>{nf.format(a.b)}</Td><Td>{nf.format(a.m)}</Td>
+                    <Td><span style={{ color: colorCsat(a.csat) }}>{fpct(a.csat)}</span></Td>
+                    <Td><b style={{ color: colorCsat(a.puntaje) }}>{fnum(a.puntaje)}</b></Td>
                   </tr>
                 )
               })}
@@ -222,8 +260,8 @@ function Tablero({ rows, alcance, setAlcance, gran, setGran, minEnc, setMinEnc, 
         )}
         {(ranking.pocos.length > 0 || ranking.ia) && (
           <div style={{ fontSize: 12.5, color: '#8aa0b6', marginTop: 12, lineHeight: 1.6 }}>
-            {ranking.pocos.length > 0 && <div>Por debajo del mínimo ({ranking.pocos.length}): {ranking.pocos.slice(0, 12).map(a => `${a.n} ${fpct(a.csat)} (${a.resp})`).join(' · ')}{ranking.pocos.length > 12 ? ' …' : ''}</div>}
-            {ranking.ia && ranking.ia.resp > 0 && <div>Agente IA / sin asignar: <b style={{ color: colorCsat(ranking.ia.csat) }}>{fpct(ranking.ia.csat)}</b> en {nf.format(ranking.ia.resp)} encuestas (no entra al ranking).</div>}
+            {ranking.pocos.length > 0 && <div>Por debajo del mínimo ({ranking.pocos.length}): {ranking.pocos.slice(0, 12).map(a => `${a.n} ${fpct(a.csat)} (${a.resp} de ${a.env})`).join(' · ')}{ranking.pocos.length > 12 ? ' …' : ''}</div>}
+            {ranking.ia && ranking.ia.resp > 0 && <div>Agente IA / sin asignar: <b style={{ color: colorCsat(ranking.ia.csat) }}>{fpct(ranking.ia.csat)}</b> en {nf.format(ranking.ia.resp)} calificadas de {nf.format(ranking.ia.env)} enviadas (no entra al ranking).</div>}
           </div>
         )}
       </Panel>
@@ -328,7 +366,7 @@ function Tabla({ cols, children }) {
   return (
     <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>
-        <thead><tr>{cols.map((c, i) => <th key={c} style={{ ...th, textAlign: i < 2 || c === 'Grupo' || c === 'Analista' || c === 'Marcas' || c === 'Marca' || c.startsWith('Motivo') ? 'left' : 'right' }}>{c}</th>)}</tr></thead>
+        <thead><tr>{cols.map((c, i) => <th key={c} style={{ ...th, textAlign: i < 2 || c === 'Día' || c === 'Ticket' || c === 'Grupo' || c === 'Analista' || c === 'Marcas' || c === 'Marca' || c.startsWith('Motivo') ? 'left' : 'right' }}>{c}</th>)}</tr></thead>
         <tbody>{children}</tbody>
       </table>
     </div>
