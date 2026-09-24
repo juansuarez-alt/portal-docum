@@ -2,13 +2,14 @@
 """
 Portal Mesa de Ayuda · Satisfacción (CSAT) MULTIMARCA
 ─────────────────────────────────────────────────────
-Por cada marca de scripts/marcas.json y cada día, toma los tickets RESUELTOS
+Por cada marca ACTIVA en Zendesk y cada día, toma los tickets RESUELTOS
 ese día (hora Colombia) y lee la calificación que dejó el usuario en el ticket
 (satisfaction_rating.score = good / bad / offered / unoffered).
 
 Guarda en Supabase (tabla satisfaccion_diaria):
   · buenas, malas y ofrecidas (encuesta enviada sin respuesta)
-  · el mismo conteo por analista (asignado del ticket) y por grupo
+  · por analista (asignado del ticket): tickets resueltos, buenas, malas y sin respuesta
+  · el mismo conteo por grupo
   · el detalle de las calificaciones malas (ticket, analista, motivo, comentario)
 
 CSAT % = buenas / (buenas + malas)  → misma fórmula que Zendesk Explore.
@@ -22,13 +23,12 @@ Uso:
 Variables de entorno: ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, ZENDESK_API_TOKEN,
 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 """
-import os, sys, json, time, argparse, datetime as dt
+import os, sys, json, time, argparse, unicodedata, datetime as dt
 from collections import defaultdict
 from zoneinfo import ZoneInfo
 import requests
 
 BOGOTA = ZoneInfo("America/Bogota")
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "marcas.json")
 SIN_ASIGNAR = "0"          # clave para tickets sin asignado (IA / bot)
 MAX_DETALLE = 300          # máx. calificaciones malas guardadas por marca y día
 
@@ -60,10 +60,17 @@ def zd_get(url, params=None):
     sys.exit("Zendesk no respondió después de 6 intentos")
 
 
+def clave_marca(nombre):
+    s = unicodedata.normalize("NFD", str(nombre or ""))
+    return "".join(c for c in s if unicodedata.category(c) != "Mn").strip().upper()
+
+
 def cargar_marcas():
-    with open(CONFIG_PATH, encoding="utf-8") as f:
-        cfg = json.load(f)
-    return {k: v for k, v in cfg.items() if not k.startswith("_")}
+    """Todas las marcas activas de Zendesk. La clave es el nombre sin tildes en mayúscula
+    (Balú → BALU, DOCUM → DOCUM), igual que en el selector del portal."""
+    data = zd_get(f"{base()}/api/v2/brands.json")
+    return {clave_marca(b["name"]): {"brand_id": b["id"], "nombre": b["name"]}
+            for b in data.get("brands", []) if b.get("active")}
 
 
 def grupos_zendesk():
@@ -104,7 +111,7 @@ def resueltos_del_dia(brand_id, dia):
 
 
 def agregar(tickets, dia, marca, grupos):
-    ana = defaultdict(lambda: {"b": 0, "m": 0, "o": 0})
+    ana = defaultdict(lambda: {"t": 0, "b": 0, "m": 0, "o": 0})
     grp = defaultdict(lambda: {"b": 0, "m": 0, "o": 0})
     malas, b, m, o = [], 0, 0, 0
     vistos = set()
@@ -112,13 +119,14 @@ def agregar(tickets, dia, marca, grupos):
         if t["id"] in vistos:
             continue
         vistos.add(t["id"])
+        aid = str(t.get("assignee_id") or SIN_ASIGNAR)
+        gname = grupos.get(t.get("group_id"), "Sin grupo")
+        ana[aid]["t"] += 1                      # todo ticket resuelto cuenta, tenga o no encuesta
         sr = t.get("satisfaction_rating") or {}
         score = (sr.get("score") or "unoffered").lower()
         clave = {"good": "b", "goodwithcomment": "b", "bad": "m", "badwithcomment": "m", "offered": "o"}.get(score)
         if not clave:
             continue
-        aid = str(t.get("assignee_id") or SIN_ASIGNAR)
-        gname = grupos.get(t.get("group_id"), "Sin grupo")
         ana[aid][clave] += 1
         grp[gname][clave] += 1
         if clave == "b": b += 1
@@ -175,7 +183,7 @@ def main():
     if args.marca:
         clave = args.marca.strip().upper()
         if clave not in marcas:
-            sys.exit(f"La marca {clave} no está en marcas.json. Disponibles: {', '.join(marcas)}")
+            sys.exit(f"La marca {clave} no está activa en Zendesk. Disponibles: {', '.join(marcas)}")
         marcas = {clave: marcas[clave]}
 
     grupos = grupos_zendesk()
@@ -187,6 +195,8 @@ def main():
         filas = []
         for d in dias:
             f = agregar(resueltos_del_dia(mc["brand_id"], d), d, marca, grupos)
+            if not f["resueltos"]:
+                continue                         # marca sin tickets resueltos ese día
             ids = [int(a) for a in f["analistas"] if a != SIN_ASIGNAR]
             usuarios(ids, cache)
             for aid, v in f["analistas"].items():
