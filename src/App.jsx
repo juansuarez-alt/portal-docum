@@ -147,7 +147,16 @@ function Shell({ children }) {
 /* ================= BASE DE CONOCIMIENTO (por marca) =================
    Cada registro es un protocolo: Título del protocolo · Proceso o situación · Respuesta (para chat o escalamiento).
    Los analistas solo ven los aprobados; digitadores proponen, verificadores aprueban. */
-const KB_VACIO = { id: null, titulo: '', categoria: '', situacion: '', tipo_respuesta: 'chat', respuesta: '' }
+const KB_VACIO = { id: null, titulo: '', alcance: '', categoria: '', situacion: '', tipo_respuesta: 'chat', respuesta: '' }
+// Alcance: a qué frente/nivel le corresponde atender el caso
+const ALCANCES = [
+  { k: 'gestion', lbl: 'Gestión', color: '#0891b2' },
+  { k: 'n1', lbl: 'Nivel 1', color: '#059669' },
+  { k: 'n2', lbl: 'Nivel 2', color: '#d97706' },
+  { k: 'n3_data', lbl: 'Nivel 3 · Data', color: '#7c3aed' },
+  { k: 'n3_desarrollo', lbl: 'Nivel 3 · Desarrollo', color: '#e11d48' },
+]
+const alcanceDe = i => ALCANCES.find(a => a.k === i.alcance)
 const TIPOS_RESP = {
   chat: { lbl: 'Respuesta para chat', corto: '💬 Chat', color: 'var(--emerald)' },
   escalamiento: { lbl: 'Escalamiento', corto: '⤴ Escalamiento', color: 'var(--indigo)' },
@@ -160,6 +169,7 @@ function BaseConocimiento({ email, name, perm, equipo }) {
   const [cargando, setCargando] = useState(true)
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('')
+  const [fAlc, setFAlc] = useState('')
   const [abierto, setAbierto] = useState(null)
   const [form, setForm] = useState(null)      // null = cerrado; objeto = creando/editando
   const [msg, setMsg] = useState(null)
@@ -181,16 +191,18 @@ function BaseConocimiento({ email, name, perm, equipo }) {
   const filtrados = useMemo(() => {
     const palabras = norm(q).split(/\s+/).filter(Boolean)
     return items.filter(i => {
+      if (fAlc && i.alcance !== fAlc) return false
       if (cat === '__pend') { if (i.aprobado) return false } else if (cat && (i.categoria || '').trim() !== cat) return false
       if (!palabras.length) return true
-      const txt = norm([i.titulo, i.categoria, i.situacion, i.respuesta, tipoDe(i).lbl].join(' '))
+      const txt = norm([i.titulo, alcanceDe(i)?.lbl, i.categoria, i.situacion, i.respuesta, tipoDe(i).lbl].join(' '))
       return palabras.every(p => txt.includes(p))
     })
-  }, [items, q, cat])
+  }, [items, q, cat, fAlc])
 
   const guardar = async () => {
     setMsg(null)
-    const f = { titulo: form.titulo.trim(), categoria: form.categoria.trim() || null, situacion: form.situacion.trim(), tipo_respuesta: form.tipo_respuesta || 'chat', respuesta: form.respuesta.trim() }
+    if (!form.alcance) { setMsg({ t: 'err', m: 'Elige el alcance: Gestión, Nivel 1, Nivel 2, Nivel 3 · Data o Nivel 3 · Desarrollo.' }); return }
+    const f = { titulo: form.titulo.trim(), alcance: form.alcance, categoria: form.categoria.trim() || null, situacion: form.situacion.trim(), tipo_respuesta: form.tipo_respuesta || 'chat', respuesta: form.respuesta.trim() }
     if (!f.titulo || !f.situacion || !f.respuesta) { setMsg({ t: 'err', m: 'Título, proceso o situación y respuesta son obligatorios.' }); return }
     const quien = name || email, ahora = new Date().toISOString()
     const ap = perm.aprobar ? { aprobado: true, aprobado_por: quien, aprobado_at: ahora } : { aprobado: false, aprobado_por: null, aprobado_at: null }
@@ -250,6 +262,13 @@ function BaseConocimiento({ email, name, perm, equipo }) {
                 <datalist id="kb-cats">{categorias.map(c => <option key={c} value={c} />)}</datalist>
               </label>
             </div>
+            <div className="f" style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>Alcance * <span className="xs">— a quién le corresponde atenderlo</span></div>
+            <div className="row" style={{ gap: 6, marginTop: 4 }}>
+              {ALCANCES.map(a => (
+                <button key={a.k} type="button" className="btn sm" onClick={() => setForm({ ...form, alcance: a.k })}
+                  style={{ border: '1px solid ' + (form.alcance === a.k ? a.color : 'var(--line)'), background: form.alcance === a.k ? a.color : '#fff', color: form.alcance === a.k ? '#fff' : 'var(--slate)' }}>{a.lbl}</button>
+              ))}
+            </div>
             <label className="f" style={{ marginTop: 10 }}>Proceso o situación * <span className="xs">— qué pasa, en qué proceso, cómo lo reporta el usuario</span>
               <textarea rows={4} value={form.situacion} onChange={e => setForm({ ...form, situacion: e.target.value })} />
             </label>
@@ -265,7 +284,7 @@ function BaseConocimiento({ email, name, perm, equipo }) {
             </label>
             {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 10 }}>{msg.m}</div>}
             <div className="row" style={{ marginTop: 12 }}>
-              <button className="btn primary" onClick={guardar} disabled={!form.titulo.trim() || !form.situacion.trim() || !form.respuesta.trim()}>{perm.aprobar ? 'Guardar y aprobar' : 'Enviar a aprobación'}</button>
+              <button className="btn primary" onClick={guardar} disabled={!form.titulo.trim() || !form.alcance || !form.situacion.trim() || !form.respuesta.trim()}>{perm.aprobar ? 'Guardar y aprobar' : 'Enviar a aprobación'}</button>
               <button className="btn ghost" onClick={() => { setForm(null); setMsg(null) }}>Cancelar</button>
             </div>
           </div>
@@ -273,6 +292,14 @@ function BaseConocimiento({ email, name, perm, equipo }) {
 
         <div className="row" style={{ alignItems: 'center' }}>
           <input style={{ flex: 1, minWidth: 220 }} placeholder={`Buscar en ${items.length} protocolos (título, proceso o respuesta)…`} value={q} onChange={e => setQ(e.target.value)} />
+        </div>
+        <div className="row" style={{ marginTop: 10, gap: 6, alignItems: 'center' }}>
+          <span className="muted xs" style={{ textTransform: 'uppercase', letterSpacing: '.08em' }}>Alcance</span>
+          <button className={'pill ' + (fAlc === '' ? 'green' : 'slate')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => setFAlc('')}>Todos</button>
+          {ALCANCES.map(a => {
+            const n = items.filter(i => i.alcance === a.k).length, on = fAlc === a.k
+            return <button key={a.k} className="pill" style={{ cursor: 'pointer', border: '1px solid ' + a.color, background: on ? a.color : 'transparent', color: on ? '#fff' : a.color }} onClick={() => setFAlc(on ? '' : a.k)}>{a.lbl}: {n}</button>
+          })}
         </div>
         {(categorias.length > 0 || (perm.verTodo && nPend > 0)) && (
           <div className="row" style={{ marginTop: 10, gap: 6 }}>
@@ -296,7 +323,7 @@ function BaseConocimiento({ email, name, perm, equipo }) {
               <div className="card" key={i.id} style={{ marginBottom: 10 }}>
                 <div className="cardh" style={{ cursor: 'pointer', borderBottom: open ? undefined : 'none' }} onClick={() => setAbierto(open ? null : i.id)}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <b>📘 {i.titulo}</b>{i.categoria && <span className="pill slate" style={{ marginLeft: 8 }}>{i.categoria}</span>}<span className="pill" style={{ marginLeft: 8, background: 'transparent', border: '1px solid ' + tipoDe(i).color, color: tipoDe(i).color }}>{tipoDe(i).corto}</span>{!i.aprobado && <span className="pill amber" style={{ marginLeft: 8 }}>⏳ Pendiente de aprobación</span>}
+                    <b>📘 {i.titulo}</b>{alcanceDe(i) && <span className="pill" style={{ marginLeft: 8, background: alcanceDe(i).color, color: '#fff' }}>{alcanceDe(i).lbl}</span>}{i.categoria && <span className="pill slate" style={{ marginLeft: 8 }}>{i.categoria}</span>}<span className="pill" style={{ marginLeft: 8, background: 'transparent', border: '1px solid ' + tipoDe(i).color, color: tipoDe(i).color }}>{tipoDe(i).corto}</span>{!i.aprobado && <span className="pill amber" style={{ marginLeft: 8 }}>⏳ Pendiente de aprobación</span>}
                     {!open && <div className="muted sm" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{i.situacion}</div>}
                   </div>
                   <span className="muted">{open ? '▲' : '▼'}</span>
@@ -309,7 +336,7 @@ function BaseConocimiento({ email, name, perm, equipo }) {
                       <span className="muted xs">Actualizado {fmtFecha(i.updated_at || i.created_at)}{i.updated_by ? ` por ${i.updated_by}` : ''}{i.aprobado && i.aprobado_por ? ` · aprobado por ${i.aprobado_por}` : ''}</span>
                       <div className="row">
                         <button className="btn ghost sm" onClick={() => copiar(i)}>{copiado === i.id ? '✓ Copiado' : (i.tipo_respuesta === 'escalamiento' ? 'Copiar escalamiento' : 'Copiar respuesta')}</button>
-                        {puedeEditar && <button className="btn ghost sm" onClick={() => { setMsg(null); setForm({ id: i.id, titulo: i.titulo, categoria: i.categoria || '', situacion: i.situacion, tipo_respuesta: i.tipo_respuesta || 'chat', respuesta: i.respuesta }); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>Editar</button>}
+                        {puedeEditar && <button className="btn ghost sm" onClick={() => { setMsg(null); setForm({ id: i.id, titulo: i.titulo, alcance: i.alcance || '', categoria: i.categoria || '', situacion: i.situacion, tipo_respuesta: i.tipo_respuesta || 'chat', respuesta: i.respuesta }); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>Editar</button>}
                         {perm.aprobar && !i.aprobado && <button className="btn primary sm" onClick={() => aprobar(i)}>✓ Aprobar</button>}
                         {(perm.borrarAprobado || (puedeEditar && !i.aprobado)) && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => borrar(i)}>Eliminar</button>}
                       </div>
