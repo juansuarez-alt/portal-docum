@@ -669,11 +669,27 @@ function Analistas() {
 
   const equiposExistentes = [...new Set(analysts.flatMap(a => String(a.equipos || '').split(',').map(x => x.trim()).filter(Boolean)))].sort()
 
+  // ---- filtros de búsqueda ----
+  const [fq, setFq] = useState('')
+  const [fEquipo, setFEquipo] = useState('')
+  const [fRol, setFRol] = useState('')
+  const sinTilde = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+  const esDig = a => !!a.digitador || a.rol === 'digitador'
+  const tieneRol = (a, r) => r === 'admin' ? a.rol === 'admin'
+    : r === 'analista' ? a.rol !== 'admin' && !esDig(a) && !a.verificador
+    : r === 'digitador' ? esDig(a) : r === 'verificador' ? !!a.verificador : true
+  const filtrados = analysts.filter(a =>
+    (!fq || sinTilde(a.name + ' ' + a.email + ' ' + (a.skill || '')).includes(sinTilde(fq.trim()))) &&
+    (!fEquipo || splitEq(a.equipos || 'DOCUM').includes(fEquipo)) &&
+    (!fRol || tieneRol(a, fRol)))
+  const cuenta = r => analysts.filter(a => tieneRol(a, r)).length
+  const hayFiltro = fq || fEquipo || fRol
+
   return (
     <div className="card">
       <div className="cardh">
         <div><b>Personas y proyectos</b>
-          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. <b>Digitador</b>: registra problemas, cantidades y protocolos, que quedan pendientes. <b>Verificador</b>: los revisa, edita y aprueba; solo lo aprobado lo ven los analistas. Una persona puede tener ambos y cambia de perfil arriba. Para entrar al portal basta con que su correo esté aquí. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
+          <div className="muted sm"><b>Digitador</b>: registra problemas, cantidades y protocolos (quedan pendientes). <b>Verificador</b>: los revisa, edita y aprueba. Una persona puede tener ambos. Para entrar basta con que su correo esté aquí. Varios equipos se separan con coma (ej: DOCUM,Balu).</div></div>
       </div>
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', marginBottom: 8 }}>
         <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
@@ -693,11 +709,29 @@ function Analistas() {
       </div>
       {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
       {equiposExistentes.length > 0 && <p className="muted sm" style={{ marginTop: 6 }}>Equipos actuales: {equiposExistentes.join(' · ')}</p>}
+      {analysts.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--line)', marginTop: 12, paddingTop: 12 }}>
+          <div className="row" style={{ alignItems: 'center' }}>
+            <input style={{ flex: 2, minWidth: 200 }} placeholder="🔎 Buscar por nombre, correo o skill…" value={fq} onChange={e => setFq(e.target.value)} />
+            <select style={{ flex: 1, minWidth: 140 }} value={fEquipo} onChange={e => setFEquipo(e.target.value)}>
+              <option value="">Todos los equipos</option>{equiposExistentes.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            {hayFiltro && <button className="btn ghost sm" onClick={() => { setFq(''); setFEquipo(''); setFRol('') }}>Limpiar filtros</button>}
+          </div>
+          <div className="row" style={{ marginTop: 8, gap: 6 }}>
+            {[['', 'Todos', analysts.length], ['admin', 'Administradores', cuenta('admin')], ['analista', 'Solo analistas', cuenta('analista')], ['digitador', '✎ Digitadores', cuenta('digitador')], ['verificador', '✓ Verificadores', cuenta('verificador')]].map(([k, l, n]) => (
+              <button key={k || 'todos'} className={'pill ' + (fRol === k ? 'green' : 'slate')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => setFRol(k)}>{l}: {n}</button>
+            ))}
+          </div>
+        </div>
+      )}
       {analysts.length === 0
         ? <div className="empty">Aún no hay personas.</div>
+        : filtrados.length === 0
+        ? <div className="empty">Nadie coincide con los filtros.</div>
         : <div className="scroll" style={{ marginTop: 8 }}>
             <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th>Digitador</th><th>Verificador</th><th></th></tr></thead>
-              <tbody>{analysts.map(a => (
+              <tbody>{filtrados.map(a => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
                   <td className="muted">{a.email}</td>
@@ -715,7 +749,7 @@ function Analistas() {
                 </tr>
               ))}</tbody></table>
           </div>}
-      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. Edita "Equipos" (sale del campo para guardar), "Rol", "Digitador" o "Verificador" directamente en la tabla.</p>
+      <p className="muted sm" style={{ marginTop: 10 }}>{hayFiltro ? `Mostrando ${filtrados.length} de ${analysts.length}.` : `Total: ${analysts.length}.`} Edita "Equipos" (sale del campo para guardar), "Rol", "Digitador" o "Verificador" directamente en la tabla.</p>
     </div>
   )
 }
