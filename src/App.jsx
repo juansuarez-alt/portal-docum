@@ -6,12 +6,24 @@ const fmtFecha = iso => iso ? new Date(iso).toLocaleDateString('es-CO', { timeZo
 const LS = { get: k => { try { return localStorage.getItem(k) } catch { return null } }, set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v) } catch { /* sin almacenamiento */ } } }
 
 // Perfiles: el admin puede verse como analista; quien es digitador alterna entre ver (analista) y agregar (digitador)
-const PERFILES = { admin: 'Administrador', digitador: 'Digitador', analista: 'Analista' }
+const PERFILES = { admin: 'Administrador', digitador: 'Digitador', verificador: 'Verificador', analista: 'Analista' }
+const ICONO = { analista: '👁 ', digitador: '✎ ', verificador: '✓ ', admin: '' }
+const perfilesDe = u => u.esAdmin ? ['admin', 'analista'] : ['analista', ...(u.esDigitador ? ['digitador'] : []), ...(u.esVerificador ? ['verificador'] : [])]
+// Qué puede hacer cada perfil en Problemas y Base de conocimiento
+//  - analista: solo ve lo aprobado
+//  - digitador: crea y edita; lo suyo queda PENDIENTE hasta que un verificador lo apruebe
+//  - verificador / admin: ve todo, edita, aprueba y elimina; lo que guardan queda aprobado
+const permisosDe = perfil => ({
+  verTodo: perfil !== 'analista',
+  editar: perfil !== 'analista',
+  aprobar: perfil === 'verificador' || perfil === 'admin',
+  borrarAprobado: perfil === 'verificador' || perfil === 'admin',
+})
 
 export default function App() {
   // Acceso sin verificación por correo: basta con que el correo esté registrado en "Personas y roles"
   const [email, setEmail] = useState(() => LS.get('mesa_email') || '')
-  const [yo, setYo] = useState(null)            // { name, equipos, esAdmin, esDigitador }
+  const [yo, setYo] = useState(null)            // { name, equipos, esAdmin, esDigitador, esVerificador }
   const [ready, setReady] = useState(false)
   const [tab, setTab] = useState('problemas')
   const [loginEmail, setLoginEmail] = useState('')
@@ -23,16 +35,17 @@ export default function App() {
 
   const cargarUsuario = useCallback(async (em) => {
     const { data: adm } = await supabase.from('admins').select('email').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
-    const { data: me } = await supabase.from('analysts').select('name,equipos,rol,digitador').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
+    const { data: me } = await supabase.from('analysts').select('name,equipos,rol,digitador,verificador').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
     if (!adm && !me) return null
     const esAdmin = !!adm || me?.rol === 'admin'
     const esDigitador = !!me?.digitador || me?.rol === 'digitador'
+    const esVerificador = !!me?.verificador
     const { data: all } = await supabase.from('analysts').select('equipos')
     const set = new Set(); (all || []).forEach(a => splitEq(a.equipos).forEach(t => set.add(t)))
     if (set.size === 0) set.add('DOCUM')
     const teams = [...set].sort()
     const mine = esAdmin ? teams : splitEq(me?.equipos)
-    return { name: me?.name || em, esAdmin, esDigitador, equipos: mine.length ? mine : (esAdmin ? teams : ['DOCUM']) }
+    return { name: me?.name || em, esAdmin, esDigitador, esVerificador, equipos: mine.length ? mine : (esAdmin ? teams : ['DOCUM']) }
   }, [])
 
   // al abrir: si ya había entrado en este navegador, recuperamos su perfil
@@ -47,7 +60,7 @@ export default function App() {
   const aplicarUsuario = (u) => {
     setYo(u); setMisEquipos(u.equipos)
     setEquipo(prev => (prev && u.equipos.includes(prev)) ? prev : u.equipos[0])
-    const disponibles = u.esAdmin ? ['admin', 'analista'] : u.esDigitador ? ['analista', 'digitador'] : ['analista']
+    const disponibles = perfilesDe(u)
     const guardado = LS.get('mesa_perfil')
     setPerfil(disponibles.includes(guardado) ? guardado : disponibles[0])
   }
@@ -67,7 +80,7 @@ export default function App() {
   const cambiarEquipo = t => { setEquipo(t); LS.set('mesa_equipo', t) }
 
   const actingAdmin = perfil === 'admin'
-  const puedeEditarKB = perfil === 'admin' || perfil === 'digitador'
+  const perm = permisosDe(perfil)
 
   if (!ready) return <div className="center muted">Cargando…</div>
 
@@ -87,7 +100,7 @@ export default function App() {
   // si estaba en una pestaña de admin y cambia de perfil, lo devolvemos a problemas
   if (!actingAdmin && (tab === 'analistas')) setTab('problemas')
 
-  const disponibles = yo.esAdmin ? ['admin', 'analista'] : yo.esDigitador ? ['analista', 'digitador'] : ['analista']
+  const disponibles = perfilesDe(yo)
 
   return (
     <div className="app">
@@ -102,7 +115,7 @@ export default function App() {
               {disponibles.map(p => (
                 <button key={p} onClick={() => cambiarPerfil(p)}
                   style={{ background: perfil === p ? '#4f46e5' : 'transparent', color: perfil === p ? '#fff' : '#cbd5e1', border: 'none', padding: '6px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                  {p === 'analista' && yo.esDigitador ? '👁 ' : p === 'digitador' ? '✎ ' : ''}{PERFILES[p]}
+                  {ICONO[p]}{PERFILES[p]}
                 </button>
               ))}
             </div>
@@ -118,8 +131,8 @@ export default function App() {
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Personas y roles</button>}
       </nav>
       <main className="wrap">
-        {tab === 'problemas' && equipo && <Problemas key={'p-' + equipo} email={email} name={yo.name} isAdmin={actingAdmin} puedeCargar={puedeEditarKB} equipo={equipo} />}
-        {tab === 'kb' && equipo && <BaseConocimiento key={'kb-' + equipo} email={email} name={yo.name} puedeEditar={puedeEditarKB} equipo={equipo} />}
+        {tab === 'problemas' && equipo && <Problemas key={'p-' + equipo} email={email} name={yo.name} isAdmin={actingAdmin} perm={perm} equipo={equipo} />}
+        {tab === 'kb' && equipo && <BaseConocimiento key={'kb-' + equipo} email={email} name={yo.name} perm={perm} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda</footer>
@@ -132,12 +145,17 @@ function Shell({ children }) {
 }
 
 /* ================= BASE DE CONOCIMIENTO (por marca) =================
-   Cada registro es un protocolo: Título · Situación · Respuesta.
-   Todos los de la marca lo leen; solo admin y digitadores crean/editan/borran
-   (la base de datos lo hace cumplir con RLS, ver supabase/base_conocimiento.sql). */
-const KB_VACIO = { id: null, titulo: '', categoria: '', situacion: '', respuesta: '' }
+   Cada registro es un protocolo: Título del protocolo · Proceso o situación · Respuesta (para chat o escalamiento).
+   Los analistas solo ven los aprobados; digitadores proponen, verificadores aprueban. */
+const KB_VACIO = { id: null, titulo: '', categoria: '', situacion: '', tipo_respuesta: 'chat', respuesta: '' }
+const TIPOS_RESP = {
+  chat: { lbl: 'Respuesta para chat', corto: '💬 Chat', color: 'var(--emerald)' },
+  escalamiento: { lbl: 'Escalamiento', corto: '⤴ Escalamiento', color: 'var(--indigo)' },
+}
+const tipoDe = i => TIPOS_RESP[i.tipo_respuesta] || TIPOS_RESP.chat
 
-function BaseConocimiento({ email, name, puedeEditar, equipo }) {
+function BaseConocimiento({ email, name, perm, equipo }) {
+  const puedeEditar = perm.editar
   const [items, setItems] = useState([])
   const [cargando, setCargando] = useState(true)
   const [q, setQ] = useState('')
@@ -149,10 +167,12 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
 
   const load = useCallback(async () => {
     setCargando(true)
-    const { data, error } = await supabase.from('kb_protocolos').select('*').eq('equipo', equipo).order('titulo')
+    let qy = supabase.from('kb_protocolos').select('*').eq('equipo', equipo).order('titulo')
+    if (!perm.verTodo) qy = qy.eq('aprobado', true)
+    const { data, error } = await qy
     if (error) setMsg({ t: 'err', m: 'No pude cargar la base de conocimiento: ' + error.message })
     setItems(data || []); setCargando(false)
-  }, [equipo])
+  }, [equipo, perm.verTodo])
   useEffect(() => { load() }, [load])
 
   const categorias = useMemo(() => [...new Set(items.map(i => (i.categoria || '').trim()).filter(Boolean))].sort(), [items])
@@ -161,27 +181,28 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
   const filtrados = useMemo(() => {
     const palabras = norm(q).split(/\s+/).filter(Boolean)
     return items.filter(i => {
-      if (cat && (i.categoria || '').trim() !== cat) return false
+      if (cat === '__pend') { if (i.aprobado) return false } else if (cat && (i.categoria || '').trim() !== cat) return false
       if (!palabras.length) return true
-      const txt = norm([i.titulo, i.categoria, i.situacion, i.respuesta].join(' '))
+      const txt = norm([i.titulo, i.categoria, i.situacion, i.respuesta, tipoDe(i).lbl].join(' '))
       return palabras.every(p => txt.includes(p))
     })
   }, [items, q, cat])
 
   const guardar = async () => {
     setMsg(null)
-    const f = { titulo: form.titulo.trim(), categoria: form.categoria.trim() || null, situacion: form.situacion.trim(), respuesta: form.respuesta.trim() }
-    if (!f.titulo || !f.situacion || !f.respuesta) { setMsg({ t: 'err', m: 'Título, situación y respuesta son obligatorios.' }); return }
-    const quien = name || email
+    const f = { titulo: form.titulo.trim(), categoria: form.categoria.trim() || null, situacion: form.situacion.trim(), tipo_respuesta: form.tipo_respuesta || 'chat', respuesta: form.respuesta.trim() }
+    if (!f.titulo || !f.situacion || !f.respuesta) { setMsg({ t: 'err', m: 'Título, proceso o situación y respuesta son obligatorios.' }); return }
+    const quien = name || email, ahora = new Date().toISOString()
+    const ap = perm.aprobar ? { aprobado: true, aprobado_por: quien, aprobado_at: ahora } : { aprobado: false, aprobado_por: null, aprobado_at: null }
     const { error } = form.id
-      ? await supabase.from('kb_protocolos').update({ ...f, updated_by: quien, updated_at: new Date().toISOString() }).eq('id', form.id)
-      : await supabase.from('kb_protocolos').insert({ ...f, equipo, created_by: quien, updated_by: quien })
+      ? await supabase.from('kb_protocolos').update({ ...f, ...ap, updated_by: quien, updated_at: ahora }).eq('id', form.id)
+      : await supabase.from('kb_protocolos').insert({ ...f, ...ap, equipo, created_by: quien, updated_by: quien })
     if (error) {
       const sinPermiso = /row-level security|permission/i.test(error.message)
       setMsg({ t: 'err', m: sinPermiso ? 'No tienes permiso para guardar en la base de conocimiento. Pide al administrador el rol Digitador.' : 'Error: ' + error.message })
       return
     }
-    setMsg({ t: 'ok', m: form.id ? 'Protocolo actualizado.' : 'Protocolo agregado.' })
+    setMsg({ t: 'ok', m: perm.aprobar ? (form.id ? 'Protocolo actualizado y aprobado.' : 'Protocolo agregado y aprobado.') : 'Enviado a aprobación: los analistas lo verán cuando un verificador lo apruebe.' })
     setForm(null); load()
   }
 
@@ -191,6 +212,13 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
     if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
     setMsg({ t: 'ok', m: 'Protocolo eliminado.' }); load()
   }
+
+  const aprobar = async (i) => {
+    const { error } = await supabase.from('kb_protocolos').update({ aprobado: true, aprobado_por: name || email, aprobado_at: new Date().toISOString() }).eq('id', i.id)
+    if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
+    setMsg({ t: 'ok', m: `"${i.titulo}" aprobado: ya lo ven los analistas.` }); load()
+  }
+  const nPend = items.filter(i => !i.aprobado).length
 
   const copiar = async (i) => {
     try { await navigator.clipboard.writeText(i.respuesta); setCopiado(i.id); setTimeout(() => setCopiado(null), 1500) } catch { /* sin portapapeles */ }
@@ -208,7 +236,7 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
       <div className="card">
         <div className="cardh">
           <div><b>Base de conocimiento — {equipo}</b>
-            <div className="muted sm">Protocolos de la mesa: qué hacer ante cada situación. {puedeEditar ? 'Tienes permiso para agregar y editar.' : 'Solo lectura; los digitadores mantienen el contenido.'}</div></div>
+            <div className="muted sm">Protocolos de la mesa: qué hacer ante cada situación. {perm.aprobar ? 'Puedes editar y aprobar.' : puedeEditar ? 'Lo que agregues o edites queda pendiente hasta que un verificador lo apruebe.' : 'Solo lectura.'}</div></div>
           {puedeEditar && !form && <button className="btn primary" onClick={() => { setMsg(null); setForm({ ...KB_VACIO }) }}>+ Nuevo protocolo</button>}
         </div>
 
@@ -216,32 +244,40 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
           <div className="panel" style={{ marginTop: 0, marginBottom: 12 }}>
             <b>{form.id ? 'Editar protocolo' : 'Nuevo protocolo'}</b>
             <div className="grid" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10, marginTop: 10 }}>
-              <label className="f">Título *<input placeholder="Ej: Usuario no recibe el correo de restablecimiento" value={form.titulo} onChange={e => setForm({ ...form, titulo: e.target.value })} /></label>
+              <label className="f">Título del protocolo *<input placeholder="Ej: Usuario no recibe el correo de restablecimiento" value={form.titulo} onChange={e => setForm({ ...form, titulo: e.target.value })} /></label>
               <label className="f">Categoría (opcional)
                 <input list="kb-cats" placeholder="Ej: Accesos" value={form.categoria} onChange={e => setForm({ ...form, categoria: e.target.value })} />
                 <datalist id="kb-cats">{categorias.map(c => <option key={c} value={c} />)}</datalist>
               </label>
             </div>
-            <label className="f" style={{ marginTop: 10 }}>Situación * <span className="xs">— qué pasa, cómo lo reporta el usuario, cómo identificarlo</span>
+            <label className="f" style={{ marginTop: 10 }}>Proceso o situación * <span className="xs">— qué pasa, en qué proceso, cómo lo reporta el usuario</span>
               <textarea rows={4} value={form.situacion} onChange={e => setForm({ ...form, situacion: e.target.value })} />
             </label>
-            <label className="f" style={{ marginTop: 10 }}>Respuesta * <span className="xs">— pasos a seguir, a quién escalar, texto para el usuario</span>
+            <div className="f" style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>Tipo de respuesta *</div>
+            <div className="row" style={{ gap: 6, marginTop: 4 }}>
+              {Object.entries(TIPOS_RESP).map(([k, t]) => (
+                <button key={k} type="button" className="btn sm" onClick={() => setForm({ ...form, tipo_respuesta: k })}
+                  style={{ border: '1px solid ' + (form.tipo_respuesta === k ? t.color : 'var(--line)'), background: form.tipo_respuesta === k ? t.color : '#fff', color: form.tipo_respuesta === k ? '#fff' : 'var(--slate)' }}>{t.corto}</button>
+              ))}
+            </div>
+            <label className="f" style={{ marginTop: 10 }}>{TIPOS_RESP[form.tipo_respuesta || 'chat'].lbl} * <span className="xs">{form.tipo_respuesta === 'escalamiento' ? '— a quién se escala, por qué medio y con qué datos' : '— el texto que se le responde al usuario por chat'}</span>
               <textarea rows={7} value={form.respuesta} onChange={e => setForm({ ...form, respuesta: e.target.value })} />
             </label>
             {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')} style={{ marginTop: 10 }}>{msg.m}</div>}
             <div className="row" style={{ marginTop: 12 }}>
-              <button className="btn primary" onClick={guardar} disabled={!form.titulo.trim() || !form.situacion.trim() || !form.respuesta.trim()}>Guardar</button>
+              <button className="btn primary" onClick={guardar} disabled={!form.titulo.trim() || !form.situacion.trim() || !form.respuesta.trim()}>{perm.aprobar ? 'Guardar y aprobar' : 'Enviar a aprobación'}</button>
               <button className="btn ghost" onClick={() => { setForm(null); setMsg(null) }}>Cancelar</button>
             </div>
           </div>
         )}
 
         <div className="row" style={{ alignItems: 'center' }}>
-          <input style={{ flex: 1, minWidth: 220 }} placeholder={`Buscar en ${items.length} protocolos (título, situación o respuesta)…`} value={q} onChange={e => setQ(e.target.value)} />
+          <input style={{ flex: 1, minWidth: 220 }} placeholder={`Buscar en ${items.length} protocolos (título, proceso o respuesta)…`} value={q} onChange={e => setQ(e.target.value)} />
         </div>
-        {categorias.length > 0 && (
+        {(categorias.length > 0 || (perm.verTodo && nPend > 0)) && (
           <div className="row" style={{ marginTop: 10, gap: 6 }}>
             <button className={'pill ' + (cat === '' ? 'green' : 'slate')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => setCat('')}>Todas</button>
+            {perm.verTodo && nPend > 0 && <button className="pill amber" style={{ border: cat === '__pend' ? '2px solid var(--amber)' : 'none', cursor: 'pointer' }} onClick={() => setCat(cat === '__pend' ? '' : '__pend')}>⏳ Pendientes de aprobación: {nPend}</button>}
             {categorias.map(c => <button key={c} className={'pill ' + (cat === c ? 'green' : 'slate')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => setCat(cat === c ? '' : c)}>{c}</button>)}
           </div>
         )}
@@ -260,21 +296,22 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
               <div className="card" key={i.id} style={{ marginBottom: 10 }}>
                 <div className="cardh" style={{ cursor: 'pointer', borderBottom: open ? undefined : 'none' }} onClick={() => setAbierto(open ? null : i.id)}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <b>📘 {i.titulo}</b>{i.categoria && <span className="pill slate" style={{ marginLeft: 8 }}>{i.categoria}</span>}
+                    <b>📘 {i.titulo}</b>{i.categoria && <span className="pill slate" style={{ marginLeft: 8 }}>{i.categoria}</span>}<span className="pill" style={{ marginLeft: 8, background: 'transparent', border: '1px solid ' + tipoDe(i).color, color: tipoDe(i).color }}>{tipoDe(i).corto}</span>{!i.aprobado && <span className="pill amber" style={{ marginLeft: 8 }}>⏳ Pendiente de aprobación</span>}
                     {!open && <div className="muted sm" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{i.situacion}</div>}
                   </div>
                   <span className="muted">{open ? '▲' : '▼'}</span>
                 </div>
                 {open && (
                   <div>
-                    {bloque('Situación', i.situacion, 'var(--amber)')}
-                    {bloque('Respuesta', i.respuesta, 'var(--emerald)')}
+                    {bloque('Proceso o situación', i.situacion, 'var(--amber)')}
+                    {bloque(tipoDe(i).lbl, i.respuesta, tipoDe(i).color)}
                     <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span className="muted xs">Actualizado {fmtFecha(i.updated_at || i.created_at)}{i.updated_by ? ` por ${i.updated_by}` : ''}</span>
+                      <span className="muted xs">Actualizado {fmtFecha(i.updated_at || i.created_at)}{i.updated_by ? ` por ${i.updated_by}` : ''}{i.aprobado && i.aprobado_por ? ` · aprobado por ${i.aprobado_por}` : ''}</span>
                       <div className="row">
-                        <button className="btn ghost sm" onClick={() => copiar(i)}>{copiado === i.id ? '✓ Copiado' : 'Copiar respuesta'}</button>
-                        {puedeEditar && <button className="btn ghost sm" onClick={() => { setMsg(null); setForm({ id: i.id, titulo: i.titulo, categoria: i.categoria || '', situacion: i.situacion, respuesta: i.respuesta }); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>Editar</button>}
-                        {puedeEditar && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => borrar(i)}>Eliminar</button>}
+                        <button className="btn ghost sm" onClick={() => copiar(i)}>{copiado === i.id ? '✓ Copiado' : (i.tipo_respuesta === 'escalamiento' ? 'Copiar escalamiento' : 'Copiar respuesta')}</button>
+                        {puedeEditar && <button className="btn ghost sm" onClick={() => { setMsg(null); setForm({ id: i.id, titulo: i.titulo, categoria: i.categoria || '', situacion: i.situacion, tipo_respuesta: i.tipo_respuesta || 'chat', respuesta: i.respuesta }); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>Editar</button>}
+                        {perm.aprobar && !i.aprobado && <button className="btn primary sm" onClick={() => aprobar(i)}>✓ Aprobar</button>}
+                        {(perm.borrarAprobado || (puedeEditar && !i.aprobado)) && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => borrar(i)}>Eliminar</button>}
                       </div>
                     </div>
                   </div>
@@ -314,7 +351,9 @@ const toISODate = v => {
 }
 const normTxt = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
 
-function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
+function Problemas({ email, name, isAdmin, perm, equipo }) {
+  const puedeCargar = perm.editar
+  const [edit, setEdit] = useState(null)            // { id, title, description } mientras se edita
   const [problems, setProblems] = useState([])
   const [conteos, setConteos] = useState([])        // { problem_id, mes, cantidad }
   const [title, setTitle] = useState('')
@@ -325,13 +364,15 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
   const [desdeEditor, setDesdeEditor] = useState(null) // primer mes visible en el editor
 
   const load = useCallback(async () => {
-    const { data: p } = await supabase.from('problems').select('*').eq('equipo', equipo).order('created_at', { ascending: true })
+    let qy = supabase.from('problems').select('*').eq('equipo', equipo).order('created_at', { ascending: true })
+    if (!perm.verTodo) qy = qy.eq('aprobado', true)
+    const { data: p } = await qy
     setProblems(p || [])
     const ids = (p || []).map(x => x.id)
     if (!ids.length) { setConteos([]); return }
     const { data: c } = await supabase.from('problem_conteos').select('problem_id,mes,cantidad').in('problem_id', ids)
     setConteos(c || [])
-  }, [equipo])
+  }, [equipo, perm.verTodo])
   useEffect(() => { load() }, [load])
 
   // ---- estadística mensual ----
@@ -355,12 +396,27 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
   const nEmpeora = problems.filter(p => stats[p.id].tend.flecha === '▲').length
 
   // ---- acciones ----
+  const aprobacion = () => perm.aprobar
+    ? { aprobado: true, aprobado_por: name || email, aprobado_at: new Date().toISOString() }
+    : { aprobado: false, aprobado_por: null, aprobado_at: null }
   const addProblem = async () => {
     if (!title.trim()) return
-    const { error } = await supabase.from('problems').insert({ equipo, title: title.trim(), description: desc.trim(), created_by: email })
+    const { error } = await supabase.from('problems').insert({ equipo, title: title.trim(), description: desc.trim(), created_by: email, ...aprobacion() })
     if (error) { setMsg({ t: 'err', m: 'Error: ' + error.message }); return }
-    setTitle(''); setDesc(''); setMsg({ t: 'ok', m: 'Problema creado.' }); load()
+    setTitle(''); setDesc(''); setMsg({ t: 'ok', m: perm.aprobar ? 'Problema creado y aprobado.' : 'Problema enviado a aprobación: los analistas lo verán cuando un verificador lo apruebe.' }); load()
   }
+  const guardarEdicion = async () => {
+    if (!edit.title.trim()) return
+    const { error } = await supabase.from('problems').update({ title: edit.title.trim(), description: edit.description.trim(), ...aprobacion() }).eq('id', edit.id)
+    if (error) { alert('Error: ' + error.message); return }
+    setEdit(null); setMsg({ t: 'ok', m: perm.aprobar ? 'Problema actualizado y aprobado.' : 'Cambios enviados a aprobación.' }); load()
+  }
+  const aprobarProblema = async (p) => {
+    const { error } = await supabase.from('problems').update({ aprobado: true, aprobado_por: name || email, aprobado_at: new Date().toISOString() }).eq('id', p.id)
+    if (error) { alert('Error: ' + error.message); return }
+    setMsg({ t: 'ok', m: `"${p.title}" aprobado: ya lo ven los analistas.` }); load()
+  }
+  const nPend = problems.filter(p => !p.aprobado).length
   const removeProblem = async (pid) => {
     if (!confirm('¿Eliminar el problema y todo su histórico?')) return
     await supabase.from('problem_conteos').delete().eq('problem_id', pid)
@@ -420,7 +476,7 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
       for (const t of temas) {
         let p = problems.find(x => normTxt(x.title) === normTxt(t.titulo))
         if (!p) {
-          const { data, error } = await supabase.from('problems').insert({ equipo, title: t.titulo, description: t.descripcion, created_by: email }).select().single()
+          const { data, error } = await supabase.from('problems').insert({ equipo, title: t.titulo, description: t.descripcion, created_by: email, ...aprobacion() }).select().single()
           if (error) throw error
           p = data; creados++
         }
@@ -467,6 +523,7 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
           <div className="row">
             <span className="pill green">▼ Mejoran: {nMejora}</span>
             <span className="pill" style={{ background: '#ffe4e6', color: '#be123c' }}>▲ Empeoran: {nEmpeora}</span>
+            {perm.verTodo && nPend > 0 && <span className="pill amber">⏳ Pendientes de aprobación: {nPend}</span>}
             {isAdmin && <>
               <button className="btn ghost sm" style={{ border: '1px solid var(--line)' }} disabled={importando} onClick={() => document.getElementById('prob-xlsx').click()}>{importando ? 'Importando…' : 'Importar Excel'}</button>
               <input id="prob-xlsx" type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => { const f = e.target.files[0]; if (f) importarExcel(f); e.target.value = '' }} />
@@ -487,7 +544,7 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
                 const s = stats[p.id]
                 return (
                   <tr key={p.id} style={{ cursor: 'pointer' }} onClick={() => document.getElementById('prob-' + p.id)?.scrollIntoView({ behavior: 'smooth' })}>
-                    <td className="left an" style={{ whiteSpace: 'normal', minWidth: 180 }}>{p.title}</td>
+                    <td className="left an" style={{ whiteSpace: 'normal', minWidth: 180 }}>{p.title}{!p.aprobado && <span className="pill amber" style={{ marginLeft: 6, fontSize: 10 }}>⏳ pendiente</span>}</td>
                     {meses.map(m => <td key={m} className="tabular" style={{ color: m === mesActual ? 'var(--muted)' : undefined, fontWeight: (m === mPrev || m === mUlt) ? 600 : 400 }}>{s.porMes[m] ?? '·'}</td>)}
                     <td className="tabular" style={{ fontWeight: 700 }}>{s.total}</td>
                     <td style={{ color: s.tend.color, fontWeight: 700, whiteSpace: 'nowrap' }}>{s.tend.flecha} {fmtPct(s.tend.pct)}</td>
@@ -500,15 +557,15 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
           </div>}
       </div>
 
-      {/* Crear problema (solo admin) */}
-      {isAdmin && (
+      {/* Crear problema: digitadores (queda pendiente), verificadores y admin (queda aprobado) */}
+      {perm.editar && (
         <div className="card">
-          <div className="cardh"><b>Registrar un problema en {equipo}</b><div className="muted sm">Solo el administrador crea problemas.</div></div>
+          <div className="cardh"><b>Registrar un problema en {equipo}</b><div className="muted sm">{perm.aprobar ? 'Queda aprobado y visible para los analistas.' : 'Queda pendiente hasta que un verificador lo apruebe.'}</div></div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
             <input placeholder="Título (ej: PQRD – Reasignación de bandejas)" value={title} onChange={e => setTitle(e.target.value)} />
             <textarea rows={2} placeholder="Descripción del problema" value={desc} onChange={e => setDesc(e.target.value)} />
           </div>
-          <button className="btn primary" style={{ marginTop: 12 }} onClick={addProblem} disabled={!title.trim()}>Crear problema</button>
+          <button className="btn primary" style={{ marginTop: 12 }} onClick={addProblem} disabled={!title.trim()}>{perm.aprobar ? 'Crear problema' : 'Enviar a aprobación'}</button>
         </div>
       )}
 
@@ -518,8 +575,23 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
         return (
           <div className="card" key={p.id} id={'prob-' + p.id}>
             <div className="cardh">
-              <div style={{ flex: 1, minWidth: 0 }}><b>⚠ {p.title}</b>{p.description && <div className="muted sm">{p.description}</div>}</div>
-              {isAdmin && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeProblem(p.id)}>Eliminar</button>}
+              {edit?.id === p.id
+                ? <div style={{ flex: 1, minWidth: 0, display: 'grid', gap: 6 }}>
+                    <input value={edit.title} onChange={e => setEdit({ ...edit, title: e.target.value })} />
+                    <textarea rows={3} value={edit.description} onChange={e => setEdit({ ...edit, description: e.target.value })} />
+                    <div className="row">
+                      <button className="btn primary sm" onClick={guardarEdicion} disabled={!edit.title.trim()}>{perm.aprobar ? 'Guardar y aprobar' : 'Enviar a aprobación'}</button>
+                      <button className="btn ghost sm" onClick={() => setEdit(null)}>Cancelar</button>
+                    </div>
+                  </div>
+                : <div style={{ flex: 1, minWidth: 0 }}><b>⚠ {p.title}</b>{!p.aprobado && <span className="pill amber" style={{ marginLeft: 8 }}>⏳ Pendiente de aprobación</span>}
+                    {p.description && <div className="muted sm">{p.description}</div>}
+                    {p.aprobado && p.aprobado_por && <div className="muted xs">Aprobado por {p.aprobado_por}</div>}</div>}
+              {edit?.id !== p.id && <div className="row" style={{ alignItems: 'center' }}>
+                {perm.aprobar && !p.aprobado && <button className="btn primary sm" onClick={() => aprobarProblema(p)}>✓ Aprobar</button>}
+                {perm.editar && <button className="btn ghost sm" onClick={() => setEdit({ id: p.id, title: p.title, description: p.description || '' })}>Editar</button>}
+                {(perm.borrarAprobado || (perm.editar && !p.aprobado)) && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeProblem(p.id)}>Eliminar</button>}
+              </div>}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 16, alignItems: 'center' }}>
               <div>
@@ -552,7 +624,7 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
               </div>
             )}
 
-            <label className="f" style={{ marginTop: 10 }}>Lectura / estado {!puedeCargar && <span className="xs">(la actualizan los digitadores)</span>}
+            <label className="f" style={{ marginTop: 10 }}>Lectura / estado {!puedeCargar && <span className="xs">(la actualizan digitadores y verificadores)</span>}
               {puedeCargar
                 ? <input key={p.estado || ''} defaultValue={p.estado || ''} placeholder="Ej: Caída sostenida, posible corrección; validar con desarrollo." onBlur={e => guardarEstado(p, e.target.value)} />
                 : <div style={{ color: 'var(--ink)', padding: '4px 0' }}>{p.estado || '—'}</div>}
@@ -567,7 +639,7 @@ function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
 /* ================= ANALISTAS / PERSONAS Y PROYECTOS (solo admin) ================= */
 function Analistas() {
   const [analysts, setAnalysts] = useState([])
-  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, skill: '' })
+  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, verificador: false, skill: '' })
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -582,9 +654,9 @@ function Analistas() {
     const eq = (form.equipos.trim() || 'DOCUM').split(',').map(x => x.trim()).filter(Boolean).join(',')
     if (!nm || !em) return
     if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
-    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, digitador: form.digitador, skill: form.skill.trim() })
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, digitador: form.digitador, verificador: form.verificador, skill: form.skill.trim() })
     if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
-    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
+    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, verificador: false, skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
   }
   const save = async (a, patch) => {
     const { error } = await supabase.from('analysts').update(patch).eq('id', a.id)
@@ -601,7 +673,7 @@ function Analistas() {
     <div className="card">
       <div className="cardh">
         <div><b>Personas y proyectos</b>
-          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. Marca <b>Digitador</b> a quien pueda cargar cantidades en Problemas y agregar a la base de conocimiento: entra como analista y cambia de perfil cuando quiera agregar. Para entrar al portal basta con que su correo esté aquí. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
+          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. <b>Digitador</b>: registra problemas, cantidades y protocolos, que quedan pendientes. <b>Verificador</b>: los revisa, edita y aprueba; solo lo aprobado lo ven los analistas. Una persona puede tener ambos y cambia de perfil arriba. Para entrar al portal basta con que su correo esté aquí. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
       </div>
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', marginBottom: 8 }}>
         <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
@@ -612,7 +684,10 @@ function Analistas() {
           <option value="analista">Analista</option><option value="admin">Administrador</option>
         </select>
         <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
-          <input type="checkbox" style={{ width: 'auto' }} checked={form.digitador} onChange={e => setForm({ ...form, digitador: e.target.checked })} /> También digitador
+          <input type="checkbox" style={{ width: 'auto' }} checked={form.digitador} onChange={e => setForm({ ...form, digitador: e.target.checked })} /> Digitador
+        </label>
+        <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+          <input type="checkbox" style={{ width: 'auto' }} checked={form.verificador} onChange={e => setForm({ ...form, verificador: e.target.checked })} /> Verificador
         </label>
         <button className="btn primary" onClick={add} disabled={!form.name.trim() || !form.email.trim()}>Agregar</button>
       </div>
@@ -621,7 +696,7 @@ function Analistas() {
       {analysts.length === 0
         ? <div className="empty">Aún no hay personas.</div>
         : <div className="scroll" style={{ marginTop: 8 }}>
-            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th>Digitador</th><th></th></tr></thead>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th>Digitador</th><th>Verificador</th><th></th></tr></thead>
               <tbody>{analysts.map(a => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
@@ -634,11 +709,13 @@ function Analistas() {
                     <option value="analista">Analista</option><option value="admin">Administrador</option></select></td>
                   <td style={{ textAlign: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!a.digitador || a.rol === 'digitador'}
                     onChange={e => save(a, { digitador: e.target.checked, ...(a.rol === 'digitador' ? { rol: 'analista' } : {}) })} /></td>
+                  <td style={{ textAlign: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!a.verificador}
+                    onChange={e => save(a, { verificador: e.target.checked })} /></td>
                   <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
                 </tr>
               ))}</tbody></table>
           </div>}
-      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. Edita "Equipos" (sale del campo para guardar), "Rol" o "Digitador" directamente en la tabla.</p>
+      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. Edita "Equipos" (sale del campo para guardar), "Rol", "Digitador" o "Verificador" directamente en la tabla.</p>
     </div>
   )
 }
