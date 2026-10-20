@@ -3,114 +3,113 @@ import { supabase, DOMINIOS } from './supabaseClient.js'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 const splitEq = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean)
 const fmtFecha = iso => iso ? new Date(iso).toLocaleDateString('es-CO', { timeZone: 'America/Bogota', day: '2-digit', month: 'short', year: 'numeric' }) : ''
+const LS = { get: k => { try { return localStorage.getItem(k) } catch { return null } }, set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v) } catch { /* sin almacenamiento */ } } }
+
+// Perfiles: el admin puede verse como analista; quien es digitador alterna entre ver (analista) y agregar (digitador)
+const PERFILES = { admin: 'Administrador', digitador: 'Digitador', analista: 'Analista' }
 
 export default function App() {
-  const [session, setSession] = useState(null)
+  // Acceso sin verificación por correo: basta con que el correo esté registrado en "Personas y roles"
+  const [email, setEmail] = useState(() => LS.get('mesa_email') || '')
+  const [yo, setYo] = useState(null)            // { name, equipos, esAdmin, esDigitador }
   const [ready, setReady] = useState(false)
-  const [isAdmin, setIsAdmin] = useState(false)
-  const [rol, setRol] = useState('analista')
-  const [blocked, setBlocked] = useState(false)
   const [tab, setTab] = useState('problemas')
   const [loginEmail, setLoginEmail] = useState('')
-  const [sent, setSent] = useState(false)
   const [authErr, setAuthErr] = useState('')
-  const [verComoAnalista, setVerComoAnalista] = useState(false)
+  const [entrando, setEntrando] = useState(false)
+  const [perfil, setPerfil] = useState('analista')
   const [misEquipos, setMisEquipos] = useState([])
-  const [equipo, setEquipo] = useState('')
+  const [equipo, setEquipo] = useState(() => LS.get('mesa_equipo') || '')
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true) })
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
-    return () => sub.subscription.unsubscribe()
+  const cargarUsuario = useCallback(async (em) => {
+    const { data: adm } = await supabase.from('admins').select('email').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
+    const { data: me } = await supabase.from('analysts').select('name,equipos,rol,digitador').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
+    if (!adm && !me) return null
+    const esAdmin = !!adm || me?.rol === 'admin'
+    const esDigitador = !!me?.digitador || me?.rol === 'digitador'
+    const { data: all } = await supabase.from('analysts').select('equipos')
+    const set = new Set(); (all || []).forEach(a => splitEq(a.equipos).forEach(t => set.add(t)))
+    if (set.size === 0) set.add('DOCUM')
+    const teams = [...set].sort()
+    const mine = esAdmin ? teams : splitEq(me?.equipos)
+    return { name: me?.name || em, esAdmin, esDigitador, equipos: mine.length ? mine : (esAdmin ? teams : ['DOCUM']) }
   }, [])
 
-  const email = session?.user?.email?.toLowerCase() || ''
-  const name = session?.user?.user_metadata?.full_name || email
-
+  // al abrir: si ya había entrado en este navegador, recuperamos su perfil
   useEffect(() => {
-    if (!session) { setIsAdmin(false); setBlocked(false); return }
-    if (!dominioOk(email)) { setBlocked(true); return }
-    setBlocked(false)
-    ;(async () => {
-      const { data: adm } = await supabase.from('admins').select('email').eq('email', email).maybeSingle()
-      const { data: me } = await supabase.from('analysts').select('equipos,rol').eq('email', email).maybeSingle()
-      const esAdmin = !!adm || (me?.rol === 'admin')
-      setIsAdmin(esAdmin)
-      setRol(esAdmin ? 'admin' : (me?.rol || 'analista'))
-      const { data: all } = await supabase.from('analysts').select('equipos')
-      const set = new Set()
-      ;(all || []).forEach(a => splitEq(a.equipos).forEach(t => set.add(t)))
-      if (set.size === 0) set.add('DOCUM')
-      const teams = [...set].sort()
-      const mine = esAdmin ? teams : splitEq(me?.equipos)
-      const visibles = mine.length ? mine : (esAdmin ? teams : ['DOCUM'])
-      setMisEquipos(visibles)
-      setEquipo(prev => (prev && visibles.includes(prev)) ? prev : (visibles[0] || 'DOCUM'))
-    })()
-  }, [session, email])
+    if (!email) { setReady(true); return }
+    cargarUsuario(email).then(u => {
+      if (!u) { LS.set('mesa_email', null); setEmail(''); setReady(true); return }
+      aplicarUsuario(u); setReady(true)
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sendMagic = async () => {
+  const aplicarUsuario = (u) => {
+    setYo(u); setMisEquipos(u.equipos)
+    setEquipo(prev => (prev && u.equipos.includes(prev)) ? prev : u.equipos[0])
+    const disponibles = u.esAdmin ? ['admin', 'analista'] : u.esDigitador ? ['analista', 'digitador'] : ['analista']
+    const guardado = LS.get('mesa_perfil')
+    setPerfil(disponibles.includes(guardado) ? guardado : disponibles[0])
+  }
+
+  const entrar = async () => {
     setAuthErr('')
     const em = loginEmail.trim().toLowerCase()
-    if (!dominioOk(em)) { setAuthErr("Usa tu correo corporativo autorizado."); return }
-    const { error } = await supabase.auth.signInWithOtp({ email: em, options: { emailRedirectTo: window.location.origin } })
-    if (error) setAuthErr(error.message); else setSent(true)
+    if (!dominioOk(em)) { setAuthErr('Usa tu correo corporativo autorizado.'); return }
+    setEntrando(true)
+    const u = await cargarUsuario(em)
+    setEntrando(false)
+    if (!u) { setAuthErr('Ese correo no está registrado en el portal. Pídele al administrador que te agregue.'); return }
+    LS.set('mesa_email', em); setEmail(em); aplicarUsuario(u)
   }
-  const logout = () => supabase.auth.signOut()
+  const salir = () => { LS.set('mesa_email', null); LS.set('mesa_perfil', null); setEmail(''); setYo(null); setLoginEmail('') }
+  const cambiarPerfil = p => { setPerfil(p); LS.set('mesa_perfil', p) }
+  const cambiarEquipo = t => { setEquipo(t); LS.set('mesa_equipo', t) }
 
-  // rol con el que se PINTA el portal (permite al admin "ver como analista")
-  const actingAdmin = isAdmin && !verComoAnalista
-  // quién puede escribir en la base de conocimiento: admin o digitador
-  const puedeEditarKB = actingAdmin || (!isAdmin && rol === 'digitador')
+  const actingAdmin = perfil === 'admin'
+  const puedeEditarKB = perfil === 'admin' || perfil === 'digitador'
 
   if (!ready) return <div className="center muted">Cargando…</div>
 
-  if (!session) return (
+  if (!email || !yo) return (
     <Shell><h1>Bienvenido a la Mesa de Ayuda</h1>
-      {sent
-        ? <p className="muted">Te enviamos un <b>enlace de acceso</b> a <b>{loginEmail}</b>. Abre tu correo y haz clic en el enlace para entrar. Puedes cerrar esta pestaña.</p>
-        : <>
-            <p className="muted">Ingresa tu correo corporativo. Te llegará un enlace de acceso a tu bandeja.</p>
-            <label className="f" style={{ marginTop: 10 }}>Correo corporativo
-              <input type="email" placeholder="Ingresa tu correo corporativo" value={loginEmail}
-                onChange={e => setLoginEmail(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && sendMagic()} />
-            </label>
-            {authErr && <div className="notice err" style={{ marginTop: 10 }}>{authErr}</div>}
-            <button className="btn primary block" onClick={sendMagic}>Enviar enlace de acceso</button>
-          </>}
+      <p className="muted">Ingresa tu correo corporativo para entrar.</p>
+      <label className="f" style={{ marginTop: 10 }}>Correo corporativo
+        <input type="email" placeholder="nombre@empresa.com" value={loginEmail} autoFocus
+          onChange={e => setLoginEmail(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && entrar()} />
+      </label>
+      {authErr && <div className="notice err" style={{ marginTop: 10 }}>{authErr}</div>}
+      <button className="btn primary block" onClick={entrar} disabled={entrando || !loginEmail.trim()}>{entrando ? 'Entrando…' : 'Entrar'}</button>
     </Shell>
   )
 
-  if (blocked) return (
-    <Shell><h1>Acceso restringido</h1>
-      <p className="muted">Tu correo no está habilitado para ingresar. Usa tu correo corporativo autorizado. Iniciaste con {email}.</p>
-      <button className="btn ghost block" onClick={logout}>Cambiar de cuenta</button>
-    </Shell>
-  )
-
-  // si estaba en una pestaña de admin y cambia a "ver como analista", lo devolvemos a problemas
+  // si estaba en una pestaña de admin y cambia de perfil, lo devolvemos a problemas
   if (!actingAdmin && (tab === 'analistas')) setTab('problemas')
 
-  const rolLabel = actingAdmin ? 'Administrador' : verComoAnalista ? 'Analista (vista previa)' : rol === 'digitador' ? 'Digitador' : 'Analista'
+  const disponibles = yo.esAdmin ? ['admin', 'analista'] : yo.esDigitador ? ['analista', 'digitador'] : ['analista']
 
   return (
     <div className="app">
       <header className="topbar">
-        <div><div className="eyebrow">MESA DE AYUDA</div><b>Centro de operación</b></div>
+        <div><div className="eyebrow">MESA DE AYUDA</div><b style={{ color: '#fff' }}>Centro de operación</b></div>
         <div className="userbox">
           {misEquipos.length > 0 && (misEquipos.length === 1
             ? <span className="pill slate">{misEquipos[0]}</span>
-            : <select value={equipo} onChange={e => setEquipo(e.target.value)} style={{ padding: '6px 8px', borderRadius: 8 }}>{misEquipos.map(t => <option key={t} value={t}>{t}</option>)}</select>)}
-          {isAdmin && (
-            <button className="btn ghost sm" style={{ border: '1px solid #334155', color: '#cbd5e1' }}
-              onClick={() => setVerComoAnalista(v => !v)}>
-              {verComoAnalista ? '↩ Volver a admin' : '👁 Ver como analista'}
-            </button>
+            : <select value={equipo} onChange={e => cambiarEquipo(e.target.value)} style={{ padding: '6px 8px', borderRadius: 8, width: 'auto' }}>{misEquipos.map(t => <option key={t} value={t}>{t}</option>)}</select>)}
+          {disponibles.length > 1 && (
+            <div style={{ display: 'flex', border: '1px solid #334155', borderRadius: 8, overflow: 'hidden' }} title="Cambia de perfil según lo que quieras hacer">
+              {disponibles.map(p => (
+                <button key={p} onClick={() => cambiarPerfil(p)}
+                  style={{ background: perfil === p ? '#4f46e5' : 'transparent', color: perfil === p ? '#fff' : '#cbd5e1', border: 'none', padding: '6px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                  {p === 'analista' && yo.esDigitador ? '👁 ' : p === 'digitador' ? '✎ ' : ''}{PERFILES[p]}
+                </button>
+              ))}
+            </div>
           )}
-          <div className="uname">{name}</div>
-          <div className={'urole ' + (actingAdmin ? 'admin' : 'analista')}>{rolLabel}</div>
-          <button className="btn ghost sm" onClick={logout}>Salir</button>
+          <div className="uname">{yo.name}</div>
+          {disponibles.length === 1 && <div className="urole analista">{PERFILES[perfil]}</div>}
+          <button className="btn ghost sm" style={{ color: '#cbd5e1' }} onClick={salir}>Salir</button>
         </div>
       </header>
       <nav className="tabs">
@@ -119,11 +118,11 @@ export default function App() {
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Personas y roles</button>}
       </nav>
       <main className="wrap">
-        {tab === 'problemas' && equipo && <Problemas key={'p-' + equipo} email={email} name={name} isAdmin={actingAdmin} equipo={equipo} />}
-        {tab === 'kb' && equipo && <BaseConocimiento key={'kb-' + equipo} email={email} name={name} puedeEditar={puedeEditarKB} equipo={equipo} />}
+        {tab === 'problemas' && equipo && <Problemas key={'p-' + equipo} email={email} name={yo.name} isAdmin={actingAdmin} puedeCargar={puedeEditarKB} equipo={equipo} />}
+        {tab === 'kb' && equipo && <BaseConocimiento key={'kb-' + equipo} email={email} name={yo.name} puedeEditar={puedeEditarKB} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
-      <footer className="foot">Mesa de Ayuda · acceso por correo corporativo</footer>
+      <footer className="foot">Mesa de Ayuda</footer>
     </div>
   )
 }
@@ -288,13 +287,13 @@ function BaseConocimiento({ email, name, puedeEditar, equipo }) {
 }
 
 /* ================= PROBLEMAS (por marca) =================
-   Un problema = un tema. Lo que importa: cuántos casos tiene y si mejora o no mes a mes.
-   Cada caso es un ticket con su fecha (la del ticket en Zendesk, no la de registro). */
+   Un problema = un tema. Se registra la CANTIDAD de casos por mes (la cargan admin y digitadores)
+   y el portal calcula el total y la variación mensual. */
 const MESES_C = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
 const mesLbl = ym => { const [y, m] = ym.split('-'); return MESES_C[+m - 1] + ' ' + y.slice(2) }
 const hoyISO = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-const mesesEntre = (a, b) => { const out = []; let [y, m] = a.split('-').map(Number); const [yb, mb] = b.split('-').map(Number)
-  while (y < yb || (y === yb && m <= mb)) { out.push(`${y}-${String(m).padStart(2, '0')}`); m++; if (m > 12) { m = 1; y++ } } return out }
+const sumarMes = (ym, n) => { let [y, m] = ym.split('-').map(Number); m += n; while (m > 12) { m -= 12; y++ } while (m < 1) { m += 12; y-- } return `${y}-${String(m).padStart(2, '0')}` }
+const mesesEntre = (a, b) => { const out = []; for (let m = a; m <= b; m = sumarMes(m, 1)) out.push(m); return out }
 const UMBRAL = 0.2   // ±20 % entre los dos últimos meses completos = cambio real
 function tendencia(prev, ult) {
   if (prev == null || ult == null) return { flecha: '—', txt: 'Sin datos suficientes', color: 'var(--muted)', pct: null }
@@ -315,56 +314,45 @@ const toISODate = v => {
 }
 const normTxt = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
 
-// Supabase devuelve máx. 1000 filas por consulta: traemos por páginas
-async function traerCasos(ids) {
-  if (!ids.length) return []
-  const out = []
-  for (let desde = 0; ; desde += 1000) {
-    const { data, error } = await supabase.from('problem_cases').select('id,problem_id,ticket,fecha,created_at')
-      .in('problem_id', ids).order('fecha', { ascending: false }).range(desde, desde + 999)
-    if (error || !data) break
-    out.push(...data); if (data.length < 1000) break
-  }
-  return out
-}
-
-function Problemas({ email, isAdmin, equipo }) {
+function Problemas({ email, name, isAdmin, puedeCargar, equipo }) {
   const [problems, setProblems] = useState([])
-  const [cases, setCases] = useState([])
-  const [openId, setOpenId] = useState(null)
+  const [conteos, setConteos] = useState([])        // { problem_id, mes, cantidad }
   const [title, setTitle] = useState('')
   const [desc, setDesc] = useState('')
   const [msg, setMsg] = useState(null)
-  const [cf, setCf] = useState({ ticket: '', fecha: hoyISO() })
-  const [lote, setLote] = useState('')
   const [importando, setImportando] = useState(false)
+  const [guardando, setGuardando] = useState(null)  // 'pid|mes' mientras guarda
+  const [desdeEditor, setDesdeEditor] = useState(null) // primer mes visible en el editor
 
   const load = useCallback(async () => {
     const { data: p } = await supabase.from('problems').select('*').eq('equipo', equipo).order('created_at', { ascending: true })
     setProblems(p || [])
-    setCases(await traerCasos((p || []).map(x => x.id)))
+    const ids = (p || []).map(x => x.id)
+    if (!ids.length) { setConteos([]); return }
+    const { data: c } = await supabase.from('problem_conteos').select('problem_id,mes,cantidad').in('problem_id', ids)
+    setConteos(c || [])
   }, [equipo])
   useEffect(() => { load() }, [load])
 
   // ---- estadística mensual ----
   const mesActual = hoyISO().slice(0, 7)
-  const fechaCaso = c => c.fecha || String(c.created_at || '').slice(0, 10)
-  const primerMes = cases.length ? cases.map(c => fechaCaso(c).slice(0, 7)).filter(Boolean).sort()[0] : mesActual
-  const meses = mesesEntre(primerMes < mesActual ? primerMes : mesActual, mesActual).slice(-12)
+  const diaHoy = +hoyISO().slice(8, 10)
+  const conDatos = conteos.filter(c => c.cantidad > 0).map(c => c.mes).sort()
+  const primero = conDatos.length && conDatos[0] < sumarMes(mesActual, -5) ? conDatos[0] : sumarMes(mesActual, -5)
+  const meses = mesesEntre(primero, mesActual).slice(-12)
   const completos = meses.filter(m => m !== mesActual)
   const [mPrev, mUlt] = [completos[completos.length - 2], completos[completos.length - 1]]
 
-  const statsDe = (pid) => {
-    const cs = cases.filter(c => c.problem_id === pid)
-    const porMes = {}; cs.forEach(c => { const k = fechaCaso(c).slice(0, 7); porMes[k] = (porMes[k] || 0) + 1 })
-    const prev = mPrev ? (porMes[mPrev] || 0) : null, ult = mUlt ? (porMes[mUlt] || 0) : null
-    return { cs, porMes, total: cs.length, prev, ult, act: porMes[mesActual] || 0, tend: tendencia(prev, ult) }
-  }
-  const stats = Object.fromEntries(problems.map(p => [p.id, statsDe(p.id)]))
-  const totalCasos = cases.length
+  const porMesDe = pid => { const o = {}; conteos.filter(c => c.problem_id === pid).forEach(c => { o[c.mes] = c.cantidad }); return o }
+  const stats = Object.fromEntries(problems.map(p => {
+    const porMes = porMesDe(p.id)
+    const total = Object.values(porMes).reduce((s, v) => s + (v || 0), 0)
+    const prev = porMes[mPrev] || 0, ult = porMes[mUlt] || 0
+    return [p.id, { porMes, total, prev, ult, act: porMes[mesActual] || 0, tend: tendencia(prev, ult) }]
+  }))
+  const totalCasos = problems.reduce((s, p) => s + stats[p.id].total, 0)
   const nMejora = problems.filter(p => stats[p.id].tend.flecha === '▼').length
   const nEmpeora = problems.filter(p => stats[p.id].tend.flecha === '▲').length
-  const diaHoy = +hoyISO().slice(8, 10)
 
   // ---- acciones ----
   const addProblem = async () => {
@@ -374,8 +362,8 @@ function Problemas({ email, isAdmin, equipo }) {
     setTitle(''); setDesc(''); setMsg({ t: 'ok', m: 'Problema creado.' }); load()
   }
   const removeProblem = async (pid) => {
-    if (!confirm('¿Eliminar el problema y todos sus casos?')) return
-    await supabase.from('problem_cases').delete().eq('problem_id', pid)
+    if (!confirm('¿Eliminar el problema y todo su histórico?')) return
+    await supabase.from('problem_conteos').delete().eq('problem_id', pid)
     await supabase.from('problems').delete().eq('id', pid); load()
   }
   const guardarEstado = async (p, txt) => {
@@ -383,45 +371,26 @@ function Problemas({ email, isAdmin, equipo }) {
     const { error } = await supabase.from('problems').update({ estado: txt.trim() || null }).eq('id', p.id)
     if (error) alert('Error: ' + error.message); else load()
   }
-  // inserta tickets sin repetir los que ya tiene el problema
-  const insertarCasos = async (pid, filas) => {
-    const ya = new Set(cases.filter(c => c.problem_id === pid).map(c => String(c.ticket)))
-    const vistos = new Set()
-    const nuevos = filas.filter(f => { const k = String(f.ticket); if (ya.has(k) || vistos.has(k)) return false; vistos.add(k); return true })
-      .map(f => ({ problem_id: pid, ticket: String(f.ticket), fecha: f.fecha, created_by: email }))
-    for (let i = 0; i < nuevos.length; i += 500) {
-      const { error } = await supabase.from('problem_cases').insert(nuevos.slice(i, i + 500))
-      if (error) throw error
-    }
-    return { nuevos: nuevos.length, repetidos: filas.length - nuevos.length }
+  // guarda la cantidad de un mes (vacío = borra ese mes)
+  const guardarCantidad = async (pid, mes, valor) => {
+    const txt = String(valor).trim()
+    const n = txt === '' ? null : Math.max(0, parseInt(txt, 10))
+    const actual = porMesDe(pid)[mes]
+    if ((n ?? null) === (actual ?? null) || (txt !== '' && isNaN(n))) return
+    setGuardando(pid + '|' + mes)
+    const { error } = n == null
+      ? await supabase.from('problem_conteos').delete().eq('problem_id', pid).eq('mes', mes)
+      : await supabase.from('problem_conteos').upsert({ problem_id: pid, mes, cantidad: n, updated_by: name || email, updated_at: new Date().toISOString() }, { onConflict: 'problem_id,mes' })
+    setGuardando(null)
+    if (error) { alert('No se pudo guardar: ' + error.message); return }
+    setConteos(cs => {
+      const resto = cs.filter(c => !(c.problem_id === pid && c.mes === mes))
+      return n == null ? resto : [...resto, { problem_id: pid, mes, cantidad: n }]
+    })
   }
-  const addCase = async (pid) => {
-    const t = cf.ticket.replace(/[^\d]/g, '')
-    if (!t) return
-    try {
-      const r = await insertarCasos(pid, [{ ticket: t, fecha: cf.fecha || hoyISO() }])
-      if (!r.nuevos) alert(`El ticket ${t} ya está registrado en este problema.`)
-      setCf({ ...cf, ticket: '' }); load()
-    } catch (e) { alert('Error: ' + e.message) }
-  }
-  // pegar varias líneas: "ticket  fecha" (fecha opcional → hoy)
-  const addLote = async (pid) => {
-    const filas = lote.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
-      const partes = l.split(/[\t;, ]+/)
-      const ticket = (partes[0] || '').replace(/[^\d]/g, '')
-      const fecha = partes.slice(1).map(toISODate).find(Boolean) || hoyISO()
-      return { ticket, fecha }
-    }).filter(f => f.ticket)
-    if (!filas.length) return
-    try {
-      const r = await insertarCasos(pid, filas)
-      alert(`${r.nuevos} tickets agregados${r.repetidos ? ` · ${r.repetidos} ya existían` : ''}.`)
-      setLote(''); load()
-    } catch (e) { alert('Error: ' + e.message) }
-  }
-  const removeCase = async (id) => { await supabase.from('problem_cases').delete().eq('id', id); load() }
 
-  // importar un Excel como "DOCUM_Casos_Zendesk_por_tema": cada hoja con columnas ID ticket + Fecha es un problema
+  // importar un Excel como "DOCUM_Casos_Zendesk_por_tema": cada hoja con "ID ticket" + "Fecha" es un problema;
+  // se cuentan los tickets por mes y se guardan como cantidades
   const importarExcel = async (file) => {
     setImportando(true); setMsg(null)
     try {
@@ -432,18 +401,22 @@ function Problemas({ email, isAdmin, equipo }) {
         const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, defval: '' })
         const h = rows.findIndex(r => r.some(c => /id\s*ticket/i.test(String(c))) && r.some(c => /^fecha$/i.test(String(c).trim())))
         if (h < 0) continue
-        const ci = rows[h].findIndex(c => /id\s*ticket/i.test(String(c))), cf2 = rows[h].findIndex(c => /^fecha$/i.test(String(c).trim()))
-        const filas = rows.slice(h + 1).map(r => ({ ticket: String(r[ci] || '').replace(/[^\d]/g, ''), fecha: toISODate(r[cf2]) })).filter(f => f.ticket && f.fecha)
-        if (!filas.length) continue
+        const ci = rows[h].findIndex(c => /id\s*ticket/i.test(String(c))), cf = rows[h].findIndex(c => /^fecha$/i.test(String(c).trim()))
+        const vistos = new Set(), porMes = {}
+        rows.slice(h + 1).forEach(r => {
+          const t = String(r[ci] || '').replace(/[^\d]/g, ''), f = toISODate(r[cf])
+          if (!t || !f || vistos.has(t)) return
+          vistos.add(t); porMes[f.slice(0, 7)] = (porMes[f.slice(0, 7)] || 0) + 1
+        })
+        if (!vistos.size) continue
         const cab = String(rows[0]?.[0] || sn)
         const titulo = h > 0 ? cab.replace(/\s+—\s+[\d.,]+\s+casos.*$/i, '').trim() : sn
         const clave = (cab.match(/·\s*'([^']+)'\s*$/) || [])[1]
-        temas.push({ titulo, descripcion: clave ? `Palabra clave en Zendesk: "${clave}"` : '', filas })
+        temas.push({ titulo, descripcion: clave ? `Palabra clave en Zendesk: "${clave}"` : '', porMes, n: vistos.size })
       }
       if (!temas.length) { setMsg({ t: 'err', m: 'No encontré hojas con columnas "ID ticket" y "Fecha".' }); setImportando(false); return }
-      const n = temas.reduce((s, t) => s + t.filas.length, 0)
-      if (!confirm(`Se encontraron ${temas.length} temas con ${n} tickets.\n\n${temas.map(t => `• ${t.titulo} (${t.filas.length})`).join('\n')}\n\n¿Importarlos a ${equipo}? Los temas que ya existan con el mismo nombre se completan sin duplicar tickets.`)) { setImportando(false); return }
-      let creados = 0, agregados = 0
+      if (!confirm(`Se encontraron ${temas.length} temas:\n\n${temas.map(t => `• ${t.titulo} (${t.n} casos)`).join('\n')}\n\n¿Cargarlos en ${equipo}? Si un problema ya existe con el mismo nombre se actualizan sus cantidades de esos meses.`)) { setImportando(false); return }
+      let creados = 0, filas = 0
       for (const t of temas) {
         let p = problems.find(x => normTxt(x.title) === normTxt(t.titulo))
         if (!p) {
@@ -451,9 +424,12 @@ function Problemas({ email, isAdmin, equipo }) {
           if (error) throw error
           p = data; creados++
         }
-        agregados += (await insertarCasos(p.id, t.filas)).nuevos
+        const up = Object.entries(t.porMes).map(([mes, cantidad]) => ({ problem_id: p.id, mes, cantidad, updated_by: name || email, updated_at: new Date().toISOString() }))
+        const { error } = await supabase.from('problem_conteos').upsert(up, { onConflict: 'problem_id,mes' })
+        if (error) throw error
+        filas += up.length
       }
-      setMsg({ t: 'ok', m: `Importación lista: ${creados} problemas nuevos y ${agregados} tickets agregados.` })
+      setMsg({ t: 'ok', m: `Carga lista: ${creados} problemas nuevos, ${filas} meses actualizados.` })
       load()
     } catch (e) { setMsg({ t: 'err', m: 'No pude importar: ' + e.message }) }
     setImportando(false)
@@ -461,10 +437,10 @@ function Problemas({ email, isAdmin, equipo }) {
 
   // ---- piezas visuales ----
   const Barras = ({ porMes }) => {
-    const max = Math.max(1, ...meses.map(m => porMes[m] || 0))
+    const ult7 = meses.slice(-7), max = Math.max(1, ...ult7.map(m => porMes[m] || 0))
     return (
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 90, padding: '6px 0' }}>
-        {meses.slice(-7).map(m => {
+        {ult7.map(m => {
           const v = porMes[m] || 0, parcial = m === mesActual
           return (
             <div key={m} style={{ flex: 1, textAlign: 'center', minWidth: 28 }} title={`${mesLbl(m)}: ${v} casos${parcial ? ' (mes en curso)' : ''}`}>
@@ -477,14 +453,17 @@ function Problemas({ email, isAdmin, equipo }) {
       </div>
     )
   }
+  // meses que se pueden editar: los 6 más recientes, o desde el que elija el digitador
+  const inicioEditor = desdeEditor || sumarMes(mesActual, -5)
+  const mesesEditor = mesesEntre(inicioEditor, mesActual)
 
   return (
     <>
-      {/* Resumen tipo "Tendencia y estado" */}
+      {/* Resumen: variación mensual de cada problema */}
       <div className="card">
         <div className="cardh">
-          <div><b>Problemas {equipo} — tendencia mensual</b>
-            <div className="muted sm">{problems.length} problemas · {totalCasos} casos · se comparan los dos últimos meses completos{mPrev ? ` (${mesLbl(mPrev)} → ${mesLbl(mUlt)})` : ''}. ▼ baja ≥20 % · ▲ sube ≥20 % · = estable.</div></div>
+          <div><b>Problemas {equipo} — variación mensual</b>
+            <div className="muted sm">{problems.length} problemas · {totalCasos} casos · compara los dos últimos meses completos{mPrev ? ` (${mesLbl(mPrev)} → ${mesLbl(mUlt)})` : ''}. ▼ baja ≥20 % · ▲ sube ≥20 % · = estable.</div></div>
           <div className="row">
             <span className="pill green">▼ Mejoran: {nMejora}</span>
             <span className="pill" style={{ background: '#ffe4e6', color: '#be123c' }}>▲ Empeoran: {nEmpeora}</span>
@@ -502,14 +481,14 @@ function Problemas({ email, isAdmin, equipo }) {
               <thead><tr>
                 <th className="left">Problema</th>
                 {meses.map(m => <th key={m}>{mesLbl(m)}{m === mesActual ? '*' : ''}</th>)}
-                <th>Total</th><th>Variación</th><th className="left">Estado</th>
+                <th>Total</th><th>Variación</th><th className="left">Tendencia</th>
               </tr></thead>
               <tbody>{problems.map(p => {
                 const s = stats[p.id]
                 return (
-                  <tr key={p.id} style={{ cursor: 'pointer' }} onClick={() => { setOpenId(p.id); setTimeout(() => document.getElementById('prob-' + p.id)?.scrollIntoView({ behavior: 'smooth' }), 50) }}>
+                  <tr key={p.id} style={{ cursor: 'pointer' }} onClick={() => document.getElementById('prob-' + p.id)?.scrollIntoView({ behavior: 'smooth' })}>
                     <td className="left an" style={{ whiteSpace: 'normal', minWidth: 180 }}>{p.title}</td>
-                    {meses.map(m => <td key={m} className="tabular" style={{ color: m === mesActual ? 'var(--muted)' : undefined, fontWeight: (m === mPrev || m === mUlt) ? 600 : 400 }}>{s.porMes[m] || 0}</td>)}
+                    {meses.map(m => <td key={m} className="tabular" style={{ color: m === mesActual ? 'var(--muted)' : undefined, fontWeight: (m === mPrev || m === mUlt) ? 600 : 400 }}>{s.porMes[m] ?? '·'}</td>)}
                     <td className="tabular" style={{ fontWeight: 700 }}>{s.total}</td>
                     <td style={{ color: s.tend.color, fontWeight: 700, whiteSpace: 'nowrap' }}>{s.tend.flecha} {fmtPct(s.tend.pct)}</td>
                     <td className="left" style={{ color: s.tend.color, whiteSpace: 'nowrap' }}>{s.tend.txt}</td>
@@ -525,9 +504,9 @@ function Problemas({ email, isAdmin, equipo }) {
       {isAdmin && (
         <div className="card">
           <div className="cardh"><b>Registrar un problema en {equipo}</b><div className="muted sm">Solo el administrador crea problemas.</div></div>
-          <div className="grid" style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
             <input placeholder="Título (ej: PQRD – Reasignación de bandejas)" value={title} onChange={e => setTitle(e.target.value)} />
-            <textarea rows={2} placeholder="Descripción breve / palabra clave en Zendesk" value={desc} onChange={e => setDesc(e.target.value)} />
+            <textarea rows={2} placeholder="Descripción del problema" value={desc} onChange={e => setDesc(e.target.value)} />
           </div>
           <button className="btn primary" style={{ marginTop: 12 }} onClick={addProblem} disabled={!title.trim()}>Crear problema</button>
         </div>
@@ -535,57 +514,49 @@ function Problemas({ email, isAdmin, equipo }) {
 
       {/* Tarjeta por problema */}
       {problems.map(p => {
-        const s = stats[p.id], open = openId === p.id
+        const s = stats[p.id]
         return (
           <div className="card" key={p.id} id={'prob-' + p.id}>
             <div className="cardh">
               <div style={{ flex: 1, minWidth: 0 }}><b>⚠ {p.title}</b>{p.description && <div className="muted sm">{p.description}</div>}</div>
-              <div className="row" style={{ alignItems: 'center' }}>
-                <button className="btn ghost sm" onClick={() => setOpenId(open ? null : p.id)}>{open ? 'Ocultar tickets' : 'Ver / agregar tickets'}</button>
-                {isAdmin && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeProblem(p.id)}>Eliminar</button>}
-              </div>
+              {isAdmin && <button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeProblem(p.id)}>Eliminar</button>}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 16, alignItems: 'center' }}>
               <div>
                 <div className="muted xs" style={{ textTransform: 'uppercase', letterSpacing: '.08em' }}>Casos totales</div>
                 <div style={{ fontSize: 34, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.1 }}>{s.total}</div>
                 <div style={{ marginTop: 6, color: s.tend.color, fontWeight: 700 }}>{s.tend.flecha} {s.tend.txt} {fmtPct(s.tend.pct) && `(${fmtPct(s.tend.pct)})`}</div>
-                {mPrev && <div className="muted sm">{mesLbl(mPrev)}: <b>{s.prev}</b> → {mesLbl(mUlt)}: <b>{s.ult}</b> · {mesLbl(mesActual)}* (al día {diaHoy}): {s.act}</div>}
+                {mPrev && <div className="muted sm">{mesLbl(mPrev)}: <b>{s.prev}</b> → {mesLbl(mUlt)}: <b>{s.ult}</b> · {mesLbl(mesActual)}*: {s.act}</div>}
               </div>
               <Barras porMes={s.porMes} />
             </div>
-            <label className="f" style={{ marginTop: 6 }}>Lectura / estado {!isAdmin && <span className="xs">(lo actualiza el administrador)</span>}
-              {isAdmin
+
+            {/* Carga de cantidades por mes: admin y digitadores */}
+            {puedeCargar && (
+              <div style={{ background: '#f8fafc', borderRadius: 9, padding: 12, marginTop: 10 }}>
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <b className="sm">Cantidad de casos por mes</b>
+                  <button className="btn ghost sm" onClick={() => setDesdeEditor(sumarMes(inicioEditor, -6))}>← Meses anteriores</button>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: `repeat(${mesesEditor.length}, minmax(64px,1fr))`, gap: 6, overflowX: 'auto' }}>
+                  {mesesEditor.map(m => (
+                    <label key={m} className="f" style={{ textAlign: 'center' }}>{mesLbl(m)}{m === mesActual ? '*' : ''}
+                      <input type="number" min="0" inputMode="numeric" key={p.id + m + (s.porMes[m] ?? '')} defaultValue={s.porMes[m] ?? ''} placeholder="—"
+                        style={{ textAlign: 'center', padding: '6px 4px', borderColor: guardando === p.id + '|' + m ? 'var(--indigo)' : undefined }}
+                        onBlur={e => guardarCantidad(p.id, m, e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && e.target.blur()} />
+                    </label>
+                  ))}
+                </div>
+                <div className="muted xs" style={{ marginTop: 6 }}>Escribe la cantidad y sal del campo (o Enter) para guardar. Déjalo vacío para quitar el dato de ese mes.</div>
+              </div>
+            )}
+
+            <label className="f" style={{ marginTop: 10 }}>Lectura / estado {!puedeCargar && <span className="xs">(la actualizan los digitadores)</span>}
+              {puedeCargar
                 ? <input key={p.estado || ''} defaultValue={p.estado || ''} placeholder="Ej: Caída sostenida, posible corrección; validar con desarrollo." onBlur={e => guardarEstado(p, e.target.value)} />
                 : <div style={{ color: 'var(--ink)', padding: '4px 0' }}>{p.estado || '—'}</div>}
             </label>
-
-            {open && (
-              <div style={{ marginTop: 14 }}>
-                <div className="grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 10, background: '#f8fafc', padding: 12, borderRadius: 9 }}>
-                  <label className="f"># Ticket<input placeholder="Ej: 10120119" value={cf.ticket} onChange={e => setCf({ ...cf, ticket: e.target.value })} onKeyDown={e => e.key === 'Enter' && addCase(p.id)} /></label>
-                  <label className="f">Fecha del ticket<input type="date" value={cf.fecha} onChange={e => setCf({ ...cf, fecha: e.target.value })} /></label>
-                  <div style={{ display: 'flex', alignItems: 'flex-end' }}><button className="btn primary sm" onClick={() => addCase(p.id)} disabled={!cf.ticket.trim()}>Agregar ticket</button></div>
-                </div>
-                <details style={{ margin: '8px 0 12px' }}>
-                  <summary className="muted sm" style={{ cursor: 'pointer' }}>Pegar varios tickets a la vez</summary>
-                  <textarea rows={4} style={{ marginTop: 6, fontFamily: 'monospace' }} placeholder={'Un ticket por línea, con su fecha opcional:\n10120119\t2026-10-14\n10119998\t14/10/2026'} value={lote} onChange={e => setLote(e.target.value)} />
-                  <button className="btn primary sm" style={{ marginTop: 6 }} onClick={() => addLote(p.id)} disabled={!lote.trim()}>Agregar tickets</button>
-                </details>
-                {s.cs.length === 0 ? <div className="empty">Sin tickets aún.</div> : (
-                  <div className="scroll" style={{ maxHeight: 320, overflowY: 'auto' }}>
-                    <table><thead><tr><th># Ticket</th><th>Fecha</th><th></th></tr></thead>
-                      <tbody>{s.cs.map(c => (
-                        <tr key={c.id}>
-                          <td className="tabular" style={{ fontWeight: 600, color: 'var(--ink)' }}>{c.ticket}</td>
-                          <td className="muted">{fechaCaso(c)}</td>
-                          <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => removeCase(c.id)}>✕</button></td>
-                        </tr>
-                      ))}</tbody></table>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )
       })}
@@ -596,7 +567,7 @@ function Problemas({ email, isAdmin, equipo }) {
 /* ================= ANALISTAS / PERSONAS Y PROYECTOS (solo admin) ================= */
 function Analistas() {
   const [analysts, setAnalysts] = useState([])
-  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', skill: '' })
+  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, skill: '' })
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -611,9 +582,9 @@ function Analistas() {
     const eq = (form.equipos.trim() || 'DOCUM').split(',').map(x => x.trim()).filter(Boolean).join(',')
     if (!nm || !em) return
     if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
-    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, skill: form.skill.trim() })
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, digitador: form.digitador, skill: form.skill.trim() })
     if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
-    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
+    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
   }
   const save = async (a, patch) => {
     const { error } = await supabase.from('analysts').update(patch).eq('id', a.id)
@@ -630,7 +601,7 @@ function Analistas() {
     <div className="card">
       <div className="cardh">
         <div><b>Personas y proyectos</b>
-          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. El rol <b>Digitador</b> puede agregar y editar la base de conocimiento de sus equipos. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
+          <div className="muted sm">Agrega personas, asígnales equipo(s) y rol. Marca <b>Digitador</b> a quien pueda cargar cantidades en Problemas y agregar a la base de conocimiento: entra como analista y cambia de perfil cuando quiera agregar. Para entrar al portal basta con que su correo esté aquí. Escribe varios equipos separados por coma (ej: DOCUM,Balu). Un proyecto nuevo aparece solo cuando se lo asignas a alguien.</div></div>
       </div>
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', marginBottom: 8 }}>
         <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
@@ -638,8 +609,11 @@ function Analistas() {
         <input placeholder="Equipos (ej: DOCUM,Balu)" value={form.equipos} onChange={e => setForm({ ...form, equipos: e.target.value })} />
         <input placeholder="Skill (ej: Atencion, Gestion)" value={form.skill} onChange={e => setForm({ ...form, skill: e.target.value })} />
         <select value={form.rol} onChange={e => setForm({ ...form, rol: e.target.value })}>
-          <option value="analista">Analista</option><option value="digitador">Digitador</option><option value="admin">Administrador</option>
+          <option value="analista">Analista</option><option value="admin">Administrador</option>
         </select>
+        <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+          <input type="checkbox" style={{ width: 'auto' }} checked={form.digitador} onChange={e => setForm({ ...form, digitador: e.target.checked })} /> También digitador
+        </label>
         <button className="btn primary" onClick={add} disabled={!form.name.trim() || !form.email.trim()}>Agregar</button>
       </div>
       {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
@@ -647,7 +621,7 @@ function Analistas() {
       {analysts.length === 0
         ? <div className="empty">Aún no hay personas.</div>
         : <div className="scroll" style={{ marginTop: 8 }}>
-            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th></th></tr></thead>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th>Digitador</th><th></th></tr></thead>
               <tbody>{analysts.map(a => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
@@ -656,13 +630,15 @@ function Analistas() {
                     onBlur={e => { const v = e.target.value.split(',').map(x => x.trim()).filter(Boolean).join(','); if (v !== (a.equipos || '')) save(a, { equipos: v || 'DOCUM' }) }} /></td>
                   <td><input defaultValue={a.skill || ''} placeholder="—" style={{ padding: '4px 8px', width: 130 }}
                     onBlur={e => { if (e.target.value.trim() !== (a.skill || '')) save(a, { skill: e.target.value.trim() }) }} /></td>
-                  <td><select defaultValue={a.rol || 'analista'} style={{ padding: '4px 8px' }} onChange={e => save(a, { rol: e.target.value })}>
-                    <option value="analista">Analista</option><option value="digitador">Digitador</option><option value="admin">Administrador</option></select></td>
+                  <td><select defaultValue={a.rol === 'admin' ? 'admin' : 'analista'} style={{ padding: '4px 8px' }} onChange={e => save(a, { rol: e.target.value })}>
+                    <option value="analista">Analista</option><option value="admin">Administrador</option></select></td>
+                  <td style={{ textAlign: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!a.digitador || a.rol === 'digitador'}
+                    onChange={e => save(a, { digitador: e.target.checked, ...(a.rol === 'digitador' ? { rol: 'analista' } : {}) })} /></td>
                   <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
                 </tr>
               ))}</tbody></table>
           </div>}
-      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. El correo debe ser el real de Google. Edita "Equipos" (sale del campo para guardar) o "Rol" directamente en la tabla.</p>
+      <p className="muted sm" style={{ marginTop: 10 }}>Total: {analysts.length}. Edita "Equipos" (sale del campo para guardar), "Rol" o "Digitador" directamente en la tabla.</p>
     </div>
   )
 }
