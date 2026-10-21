@@ -117,8 +117,8 @@ function Resultado({ res, desde, hasta, setRango, sabados, setSabados, equipo })
   const { dias, filas, total: T, movimientos: M } = res
 
   const exportar = () => {
-    const head = ['Marca', 'Desde', 'Hasta', 'Días hábiles', 'Frente', 'OLA (min)', 'Tickets', 'Tickets/día', 'Meta', 'Req. exacto', 'Requeridos', 'Actuales', 'Holgura', 'Ocupación %']
-    const rows = filas.map(x => [equipo, desde, hasta, dias, x.frente, x.ola_minutos, x.tickets.toFixed(0), x.demanda.toFixed(1), x.meta, x.reqExacto.toFixed(2), x.requeridos, x.actuales, x.holgura, Number.isFinite(x.ocupacion) ? (x.ocupacion * 100).toFixed(0) : ''])
+    const head = ['Marca', 'Desde', 'Hasta', 'Días hábiles', 'Frente', 'OLA (min)', 'Tickets', 'Tickets/día', 'Meta', 'Requeridos', 'Actuales', 'Holgura', 'Ocupación %']
+    const rows = filas.map(x => [equipo, desde, hasta, dias, x.frente, x.ola_minutos, x.tickets.toFixed(0), x.demanda.toFixed(1), x.meta, x.requeridos, x.actuales, x.holgura, Number.isFinite(x.ocupacion) ? (x.ocupacion * 100).toFixed(0) : ''])
     const csv = '﻿' + [head, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\n')
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
@@ -155,16 +155,16 @@ function Resultado({ res, desde, hasta, setRango, sabados, setSabados, equipo })
         {dias === 0 ? <div className="empty">El rango no tiene días hábiles.</div> :
           <div className="scroll">
             <table className="captab">
-              <thead><tr><th>Frente</th><th>OLA</th><th>Tickets</th><th>Tickets/día</th><th>Meta</th><th>Req. exacto</th><th>Requeridos</th><th>Actuales</th><th>Holgura</th><th>Ocupación</th></tr></thead>
+              <thead><tr><th>Frente</th><th>OLA</th><th>Tickets</th><th>Tickets/día</th><th>Meta</th><th>Requeridos</th><th>Actuales</th><th>Holgura</th><th>Ocupación</th></tr></thead>
               <tbody>{filas.map(x => (
                 <tr key={x.id}>
                   <td><b>{x.frente}</b></td><td>{olaTxt(x.ola_minutos)}</td><td>{fmt(x.tickets)}</td><td>{fmt(x.demanda, 1)}</td>
-                  <td>{fmt(x.meta)}</td><td>{fmt(x.reqExacto, 2)}</td><td>{fmt(x.requeridos)}</td><td>{fmt(x.actuales)}</td>
+                  <td>{fmt(x.meta)}</td><td>{fmt(x.requeridos)}</td><td>{fmt(x.actuales)}</td>
                   <td><span className={'pill ' + PILL[x.estado]}>{ETQ[x.estado]} {signo(x.holgura)}</span></td>
                   <td>{pct(x.ocupacion)}
                     <div className="capbar"><i style={{ width: Math.min(100, (Number.isFinite(x.ocupacion) ? x.ocupacion : 1) * 100) + '%', background: x.ocupacion > 1 ? 'var(--rose)' : 'var(--indigo)' }} /></div></td>
                 </tr>))}</tbody>
-              <tfoot><tr><td>Total mesa</td><td /><td>{fmt(T.tickets)}</td><td>{fmt(T.demanda, 1)}</td><td /><td />
+              <tfoot><tr><td>Total mesa</td><td /><td>{fmt(T.tickets)}</td><td>{fmt(T.demanda, 1)}</td><td />
                 <td>{fmt(T.requeridos)}</td><td>{fmt(T.actuales)}</td><td>{signo(T.holgura)}</td><td>{pct(T.ocupacion)}</td></tr></tfoot>
             </table>
           </div>}
