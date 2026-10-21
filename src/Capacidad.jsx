@@ -4,9 +4,8 @@ import { calcularCapacidad } from './capacidadCalc.js'
 
 /* ================= CAPACIDAD (por marca) =================
    ¿Cuántos analistas necesita cada frente según el volumen de tickets, la meta diaria y el OLA?
-   - Analista: ve el resultado.
-   - Digitador: además carga el volumen de tickets.
-   - Verificador / Admin: además configura los frentes (OLA, meta, analistas...). */
+   Visible solo para administradores y líderes (columna analysts.lider); App.jsx les da
+   permiso completo: ver el resultado, cargar volumen y configurar los frentes. */
 
 const FRENTES_BASE = [
   { nombre: 'Atención', ola_minutos: 15, meta_diaria: 50, analistas_actuales: 1, ocupacion_max: 0.85 },
