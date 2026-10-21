@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { supabase, DOMINIOS } from './supabaseClient.js'
+import Capacidad from './Capacidad.jsx'
 const dominioOk = (e) => DOMINIOS.some(d => String(e || '').toLowerCase().endsWith('@' + d))
 const splitEq = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean)
 const fmtFecha = iso => iso ? new Date(iso).toLocaleDateString('es-CO', { timeZone: 'America/Bogota', day: '2-digit', month: 'short', year: 'numeric' }) : ''
@@ -128,11 +129,13 @@ export default function App() {
       <nav className="tabs">
         <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas {equipo}</button>
         <button className={tab === 'kb' ? 'on' : ''} onClick={() => setTab('kb')}>Base de conocimiento {equipo}</button>
+        <button className={tab === 'capacidad' ? 'on' : ''} onClick={() => setTab('capacidad')}>Capacidad {equipo}</button>
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Personas y roles</button>}
       </nav>
       <main className="wrap">
         {tab === 'problemas' && equipo && <Problemas key={'p-' + equipo} email={email} name={yo.name} isAdmin={actingAdmin} perm={perm} equipo={equipo} />}
         {tab === 'kb' && equipo && <BaseConocimiento key={'kb-' + equipo} email={email} name={yo.name} perm={perm} equipo={equipo} />}
+        {tab === 'capacidad' && equipo && <Capacidad key={'cap-' + equipo + perfil} name={yo.name} perm={perm} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda</footer>
