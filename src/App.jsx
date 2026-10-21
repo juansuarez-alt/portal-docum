@@ -36,17 +36,18 @@ export default function App() {
 
   const cargarUsuario = useCallback(async (em) => {
     const { data: adm } = await supabase.from('admins').select('email').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
-    const { data: me } = await supabase.from('analysts').select('name,equipos,rol,digitador,verificador').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
+    const { data: me } = await supabase.from('analysts').select('*').ilike('email', em.replace(/[\\%_]/g, '\\$&')).maybeSingle()
     if (!adm && !me) return null
     const esAdmin = !!adm || me?.rol === 'admin'
     const esDigitador = !!me?.digitador || me?.rol === 'digitador'
     const esVerificador = !!me?.verificador
+    const esLider = !!me?.lider
     const { data: all } = await supabase.from('analysts').select('equipos')
     const set = new Set(); (all || []).forEach(a => splitEq(a.equipos).forEach(t => set.add(t)))
     if (set.size === 0) set.add('DOCUM')
     const teams = [...set].sort()
     const mine = esAdmin ? teams : splitEq(me?.equipos)
-    return { name: me?.name || em, esAdmin, esDigitador, esVerificador, equipos: mine.length ? mine : (esAdmin ? teams : ['DOCUM']) }
+    return { name: me?.name || em, esAdmin, esDigitador, esVerificador, esLider, equipos: mine.length ? mine : (esAdmin ? teams : ['DOCUM']) }
   }, [])
 
   // al abrir: si ya había entrado en este navegador, recuperamos su perfil
@@ -100,6 +101,9 @@ export default function App() {
 
   // si estaba en una pestaña de admin y cambia de perfil, lo devolvemos a problemas
   if (!actingAdmin && (tab === 'analistas')) setTab('problemas')
+  // Capacidad: solo administradores y líderes
+  const verCapacidad = actingAdmin || !!yo.esLider
+  if (!verCapacidad && tab === 'capacidad') setTab('problemas')
 
   const disponibles = perfilesDe(yo)
 
@@ -129,13 +133,13 @@ export default function App() {
       <nav className="tabs">
         <button className={tab === 'problemas' ? 'on' : ''} onClick={() => setTab('problemas')}>Problemas {equipo}</button>
         <button className={tab === 'kb' ? 'on' : ''} onClick={() => setTab('kb')}>Base de conocimiento {equipo}</button>
-        <button className={tab === 'capacidad' ? 'on' : ''} onClick={() => setTab('capacidad')}>Capacidad {equipo}</button>
+        {verCapacidad && <button className={tab === 'capacidad' ? 'on' : ''} onClick={() => setTab('capacidad')}>Capacidad {equipo}</button>}
         {actingAdmin && <button className={tab === 'analistas' ? 'on' : ''} onClick={() => setTab('analistas')}>Personas y roles</button>}
       </nav>
       <main className="wrap">
         {tab === 'problemas' && equipo && <Problemas key={'p-' + equipo} email={email} name={yo.name} isAdmin={actingAdmin} perm={perm} equipo={equipo} />}
         {tab === 'kb' && equipo && <BaseConocimiento key={'kb-' + equipo} email={email} name={yo.name} perm={perm} equipo={equipo} />}
-        {tab === 'capacidad' && equipo && <Capacidad key={'cap-' + equipo + perfil} name={yo.name} perm={perm} equipo={equipo} />}
+        {tab === 'capacidad' && equipo && verCapacidad && <Capacidad key={'cap-' + equipo} name={yo.name} perm={{ editar: true, aprobar: true }} equipo={equipo} />}
         {tab === 'analistas' && actingAdmin && <Analistas />}
       </main>
       <footer className="foot">Mesa de Ayuda</footer>
@@ -740,7 +744,7 @@ function Problemas({ email, name, isAdmin, perm, equipo }) {
 /* ================= ANALISTAS / PERSONAS Y PROYECTOS (solo admin) ================= */
 function Analistas() {
   const [analysts, setAnalysts] = useState([])
-  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, verificador: false, skill: '' })
+  const [form, setForm] = useState({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, verificador: false, lider: false, skill: '' })
   const [msg, setMsg] = useState(null)
 
   const load = useCallback(async () => {
@@ -755,9 +759,9 @@ function Analistas() {
     const eq = (form.equipos.trim() || 'DOCUM').split(',').map(x => x.trim()).filter(Boolean).join(',')
     if (!nm || !em) return
     if (!em.includes('@')) { setMsg({ t: 'err', m: 'Correo inválido.' }); return }
-    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, digitador: form.digitador, verificador: form.verificador, skill: form.skill.trim() })
+    const { error } = await supabase.from('analysts').insert({ name: nm, email: em, equipos: eq, rol: form.rol, digitador: form.digitador, verificador: form.verificador, lider: form.lider, skill: form.skill.trim() })
     if (error) { setMsg({ t: 'err', m: error.message.includes('duplicate') ? 'Ese correo ya está registrado.' : 'Error: ' + error.message }); return }
-    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, verificador: false, skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
+    setForm({ name: '', email: '', equipos: 'DOCUM', rol: 'analista', digitador: false, verificador: false, lider: false, skill: '' }); setMsg({ t: 'ok', m: 'Persona agregada.' }); load()
   }
   const save = async (a, patch) => {
     const { error } = await supabase.from('analysts').update(patch).eq('id', a.id)
@@ -778,7 +782,7 @@ function Analistas() {
   const esDig = a => !!a.digitador || a.rol === 'digitador'
   const tieneRol = (a, r) => r === 'admin' ? a.rol === 'admin'
     : r === 'analista' ? a.rol !== 'admin' && !esDig(a) && !a.verificador
-    : r === 'digitador' ? esDig(a) : r === 'verificador' ? !!a.verificador : true
+    : r === 'digitador' ? esDig(a) : r === 'verificador' ? !!a.verificador : r === 'lider' ? !!a.lider : true
   const filtrados = analysts.filter(a =>
     (!fq || sinTilde(a.name + ' ' + a.email + ' ' + (a.skill || '')).includes(sinTilde(fq.trim()))) &&
     (!fEquipo || splitEq(a.equipos || 'DOCUM').includes(fEquipo)) &&
@@ -790,7 +794,7 @@ function Analistas() {
     <div className="card">
       <div className="cardh">
         <div><b>Personas y proyectos</b>
-          <div className="muted sm"><b>Digitador</b>: registra problemas, cantidades y protocolos (quedan pendientes). <b>Verificador</b>: los revisa, edita y aprueba. Una persona puede tener ambos. Para entrar basta con que su correo esté aquí. Varios equipos se separan con coma (ej: DOCUM,Balu).</div></div>
+          <div className="muted sm"><b>Digitador</b>: registra problemas, cantidades y protocolos (quedan pendientes). <b>Verificador</b>: los revisa, edita y aprueba. Una persona puede tener ambos. <b>Líder</b>: ve y administra la pestaña Capacidad (los administradores también). Para entrar basta con que su correo esté aquí. Varios equipos se separan con coma (ej: DOCUM,Balu).</div></div>
       </div>
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', marginBottom: 8 }}>
         <input placeholder="Nombre completo" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
@@ -806,6 +810,9 @@ function Analistas() {
         <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
           <input type="checkbox" style={{ width: 'auto' }} checked={form.verificador} onChange={e => setForm({ ...form, verificador: e.target.checked })} /> Verificador
         </label>
+        <label className="f" style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+          <input type="checkbox" style={{ width: 'auto' }} checked={form.lider} onChange={e => setForm({ ...form, lider: e.target.checked })} /> Líder
+        </label>
         <button className="btn primary" onClick={add} disabled={!form.name.trim() || !form.email.trim()}>Agregar</button>
       </div>
       {msg && <div className={'notice ' + (msg.t === 'err' ? 'err' : 'ok')}>{msg.m}</div>}
@@ -820,7 +827,7 @@ function Analistas() {
             {hayFiltro && <button className="btn ghost sm" onClick={() => { setFq(''); setFEquipo(''); setFRol('') }}>Limpiar filtros</button>}
           </div>
           <div className="row" style={{ marginTop: 8, gap: 6 }}>
-            {[['', 'Todos', analysts.length], ['admin', 'Administradores', cuenta('admin')], ['analista', 'Solo analistas', cuenta('analista')], ['digitador', '✎ Digitadores', cuenta('digitador')], ['verificador', '✓ Verificadores', cuenta('verificador')]].map(([k, l, n]) => (
+            {[['', 'Todos', analysts.length], ['admin', 'Administradores', cuenta('admin')], ['analista', 'Solo analistas', cuenta('analista')], ['digitador', '✎ Digitadores', cuenta('digitador')], ['verificador', '✓ Verificadores', cuenta('verificador')], ['lider', '★ Líderes', cuenta('lider')]].map(([k, l, n]) => (
               <button key={k || 'todos'} className={'pill ' + (fRol === k ? 'green' : 'slate')} style={{ border: 'none', cursor: 'pointer' }} onClick={() => setFRol(k)}>{l}: {n}</button>
             ))}
           </div>
@@ -831,7 +838,7 @@ function Analistas() {
         : filtrados.length === 0
         ? <div className="empty">Nadie coincide con los filtros.</div>
         : <div className="scroll" style={{ marginTop: 8 }}>
-            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th>Digitador</th><th>Verificador</th><th></th></tr></thead>
+            <table><thead><tr><th>Nombre</th><th>Correo</th><th>Equipos</th><th>Skill</th><th>Rol</th><th>Digitador</th><th>Verificador</th><th>Líder</th><th></th></tr></thead>
               <tbody>{filtrados.map(a => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600, color: 'var(--ink)' }}>{a.name}</td>
@@ -846,11 +853,13 @@ function Analistas() {
                     onChange={e => save(a, { digitador: e.target.checked, ...(a.rol === 'digitador' ? { rol: 'analista' } : {}) })} /></td>
                   <td style={{ textAlign: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!a.verificador}
                     onChange={e => save(a, { verificador: e.target.checked })} /></td>
+                  <td style={{ textAlign: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!a.lider}
+                    onChange={e => save(a, { lider: e.target.checked })} /></td>
                   <td style={{ textAlign: 'right' }}><button className="btn ghost sm" style={{ color: 'var(--rose)' }} onClick={() => remove(a)}>Quitar</button></td>
                 </tr>
               ))}</tbody></table>
           </div>}
-      <p className="muted sm" style={{ marginTop: 10 }}>{hayFiltro ? `Mostrando ${filtrados.length} de ${analysts.length}.` : `Total: ${analysts.length}.`} Edita "Equipos" (sale del campo para guardar), "Rol", "Digitador" o "Verificador" directamente en la tabla.</p>
+      <p className="muted sm" style={{ marginTop: 10 }}>{hayFiltro ? `Mostrando ${filtrados.length} de ${analysts.length}.` : `Total: ${analysts.length}.`} Edita "Equipos" (sale del campo para guardar), "Rol", "Digitador", "Verificador" o "Líder" directamente en la tabla.</p>
     </div>
   )
 }
